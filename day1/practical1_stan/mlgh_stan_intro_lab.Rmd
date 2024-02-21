@@ -1,0 +1,710 @@
+---
+title: |
+  ![](images\IMP_ML_K_PS_CLEAR-SPACE2.png){height=14mm}
+  ![](images\MLGHN_Logo_colour.png){height=16mm}
+  <br><br>
+  Computing lab: Stan Basics
+subtitle: 'North-South-AIMS-Imperial: modern statistics and global health'
+author: "Yu Chen and Oliver Ratmann<br><br>"
+output: 
+  bookdown::html_document2:
+    toc: TRUE
+    toc_float: TRUE
+    highlight: tango
+  bookdown::pdf_book:
+    keep_tex: yes
+---
+
+<style type="text/css">
+h1{
+  font-size: 24pt;
+}
+h2{
+  font-size: 18pt;
+}
+body{
+  font-size: 12pt;
+}
+</style>
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+include_solutions <- FALSE
+```
+
+# Study objectives
+Hello all!
+
+By the end of this lab,
+
+- you will understand the key benefits of modern statistical computing languages such as `Stan`; and
+- you will have installed the `Stan` software within `R`, either via `rstan` or `cmdstanr`; and 
+- you will be familiar with a typical analysis workflow using `Stan`, and associated `R` commands.
+
+This work is licensed under a [Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International License](https://creativecommons.org/licenses/by-nc-nd/4.0/).
+
+# Why Stan?
+
+`Stan`
+
+- is an open-source statistical inference software, which implements gradient-based MCMC to sample from posterior distributions.
+- allows us to focus on statistical modelling, rather than implementing inference algorithms.
+- algorithms are implemented in \textsl{C++}, and have an `R` interface . 
+- Bayesian models are written in text files. 
+
+There are several modern alternatives to `Stan`, including
+
+- [numpyro](https://num.pyro.ai/en/latest/index.html#introductory-tutorials); and
+- [TMD](https://github.com/kaskr/adcomp/wiki); and
+- [Nimble](https://r-nimble.org).
+
+# Installation
+
+The first objective of today's lab is to install `Stan` on your computer, along with related helpful packages. We hope you may have already achieved this but please consult the installation instructions below in detail if you haven't. A key step in working with `Stan` is that your model is compiled using `C++`, and for this step `R` needs to know where your compilers live, and the correct compiler versions of course also need to be installed. This is why you need to install and configure the chain of `C++` tools on your Linux, MacOS, or Windows system as described below, and this is why installation is a little more involved compared to installations of most other `R` packages. 
+
+Install `rstan`:
+
+- [https://github.com/stan-dev/rstan/wiki/RStan-Getting-Started](https://github.com/stan-dev/rstan/wiki/RStan-Getting-Started)
+- Tip: It is strongly recommend to install `rstan` in `R` version 4.0.0 or higher; 
+- For MacOS, [compared to previous approaches, I find the instructions through the macrtools package ](https://mac.thecoatlessprofessor.com/macrtools/) most helpful; 
+- If the above results in timeouts, install the missing software manually [as described here](https://mac.r-project.org/tools/);
+- Verify your installation as described on the `RStan-Getting-Started` website.
+
+Alternatively install `cmdstanr`:
+
+- [https://mc-stan.org/cmdstanr/](https://mc-stan.org/cmdstanr/articles/cmdstanr.html)
+- `cmdstanr` is a recently developed lightweight alternative to `rstan`. The functions to compile, run, and access the output of Bayesian inference algorithms are very similar, but not identical to those in the `rstan` package. However, both `cmdstanr` and `stanr` read exactly the same `Stan` model files, and so `cmdstanr` is an excellent alternative if you run into installation issues with `rstan`, or if you would rather work with the most recent `R` interface to `Stan`'s algorithms;
+- Verify your installation as described on the `Cmdstanr-Getting-Started` website.
+
+Then install `bayesplot` using `install.packages("bayesplot")` in `R`.
+
+
+# Hello world example, using rstan
+
+Let us start with a very simple example to become familiar with `Stan`. 
+
+We aim to fit a normal model to 100 data points $y_i, i=1,\dotsc,n=100$, and estimate the joint posterior distribution of the mean and standard deviation numerically with Stan,
+
+\begin{align*}
+&y_{i} \sim \text{Normal}(\mu, \sigma^2) \\
+& \mu \sim \text{Normal}(0,200)\\
+& \sigma\sim \text{Half-Cauchy}(0,1).
+\end{align*}
+
+Let us compile the corresponding `Stan` model and run two Hamiltonian Monte Carlo (HMC) chains for 4,000 iterations each, including 1,000 warmup iterations. 
+
+Every `Stan` model files is structured in terms of the following blocks:
+
+- `data` block: specifies data required to fit the model
+- `transformed data` block: specifies temporary transformations of the data, e.g. QR decomposition of $X$; variables that do not change
+- `parameters` block: specifies all parameters that are fitted; cannot be assigned values directly
+- `transformed parameters` block: optional transformations of parameters, e.g. risk differences
+- `model` block: specifies the model in terms of likelihood and priors
+- `generated quantities` block: quantities that depend on parameters and data, and do not affect inference
+
+Here is a simple implementation of our Hello World normal model:
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=TRUE} 
+# Hello World normal model
+model1_text <- "
+data{
+    int<lower=1> N;
+    real y[N];
+}
+parameters{
+    real mu;
+    real<lower=0> sigma;
+}
+model{
+    sigma ~ cauchy( 0 , 1 );
+    mu ~ normal( 0 , 10 );
+    y ~ normal( mu , sigma );
+}
+"
+```
+
+To use this model in `R`, we start by loading up our `R` packages:
+```{r, include=TRUE, eval=TRUE, message=FALSE, echo=TRUE, warning=FALSE, tidy=TRUE}
+require(data.table) # data mangling
+require(ggplot2) # for plotting
+require(hexbin) # for plotting
+require(tidyverse) # data mangling
+require(rstan) # run Stan from R
+require(bayesplot) # plot Stan output
+require(knitr) # for Rmarkdown
+require(kableExtra) # for Rmarkdown
+
+# change this line as needed to point to the directory 
+#    where all output from this lab is stored
+out.dir <- ''
+
+# set options relevant to rstan
+options(mc.cores = 1)
+rstan:::rstan_options(auto_write = TRUE)
+```
+
+Now, please complete the following code block to sample from the joint posterior associated with the Hello World model for 4,000 iterations including 1,000 iterations of warmup. Setup two Hamiltonian Monte Carlo chains and initialise the two chains at $(\mu=1, \sigma=2)$ and $(\mu=-1, \sigma=0.5)$:
+
+```{r, include=!include_solutions, eval=FALSE, echo=!include_solutions, message=FALSE, tidy=FALSE, results="hide"} 
+#	Make data
+set.seed(010680)	# use your birth date
+y <- rnorm(1e2, mean=0, sd=1)
+stan_data <- list()
+stan_data$N <- length(y)
+stan_data$y <- y
+
+# compile Stan model
+model1_compiled <- rstan::stan_model(
+  model_name = 'model1', 
+  model_code = gsub('\t',' ',model1_text)
+  )
+
+# run Stan
+# TODO model1_fit <-
+
+# TODO save output to RDS
+saveRDS(model1_fit, file = file.path(out.dir, "model1_fit_rstan.rds"))
+```
+
+```{r, include=include_solutions, eval=TRUE, echo=TRUE, tidy=FALSE, cache=TRUE, results="hide"} 
+# compile Stan model
+#	Make data
+set.seed(010680)	# use your birth date
+y <- rnorm(1e2, mean = 0, sd = 1)
+stan_data <- list()
+stan_data$N <- length(y)
+stan_data$y <- y
+
+model1_compiled <- rstan::stan_model(
+  model_name = 'model1', 
+  model_code = gsub('\t',' ',model1_text)
+  )
+
+# run Stan
+model1_fit <- rstan::sampling(model1_compiled, 
+  data = stan_data, 
+  warmup = 1e3, 
+	iter = 4e3, 
+	chains = 2,
+	init = list( list(mu = 1,sigma = 2),list(mu = -1, sigma = 0.5) )
+  )
+
+# save output to RDS
+saveRDS(model1_fit, file = file.path(out.dir, "model1_fit_rstan.rds"))
+```
+
+Next, we explore the following code snippets that provide key functions to assess the Monte Carlo output. 
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=TRUE} 
+# load output from RDS
+model1_fit <- readRDS(file = file.path(out.dir, "model1_fit_rstan.rds"))
+model1_pars <- c("mu", "sigma")
+
+# assess mixing and convergence
+print(model1_fit, 
+      pars = model1_pars,
+      probs = c(0.025, 0.25, 0.5, 0.75, 0.975),
+      digits_summary = 2
+      )
+
+# to plot traces and assess convergence, 
+# extract Monte Carlo samples including warmup and without permutation
+# 
+# often helpful to plot the log posterior density too
+model1_po <- rstan:::extract(model1_fit, 
+                             pars = c("lp__",model1_pars),
+                             inc_warmup = TRUE, 
+                             permuted = FALSE)
+
+# make trace plots
+bayesplot:::color_scheme_set("mix-blue-pink")
+p <- bayesplot:::mcmc_trace(model1_po,  
+                            pars = c("lp__",model1_pars), 
+                            n_warmup = 1e3,
+                            facet_args = list(nrow = 2)
+                            )
+pdf(file = file.path(out.dir,'model1_trace.pdf'), width = 10, height = 8)
+print(p)
+dev.off()
+
+# make pairs plots of samples excluding warmup
+#
+# often helpful to plot the log posterior density too
+model1_po <- rstan:::extract(model1_fit, 
+                             pars = c("lp__",model1_pars),
+                             inc_warmup = FALSE, 
+                             permuted = FALSE)
+p <- bayesplot::mcmc_pairs(model1_po, 
+                           pars = c("lp__",model1_pars), 
+                           off_diag_args = list(size = 0.3, alpha = 0.3)
+                           )
+ggsave(file = file.path(out.dir,'model1_pairsplot.png'), 
+       plot = p, 
+       h = 20, 
+       w = 20, 
+       limitsize = FALSE
+       )
+
+# to manipulate the posterior Monte Carlo samples after warmup
+# we typically prefer to
+# extract Monte Carlo samples as a data frame
+# 
+# we will review the melt and dcast functions later as well
+# but do note their use here
+model1_pars <- c("mu", "sigma")
+model1_po <- rstan:::extract(model1_fit, 
+                             pars = model1_pars,
+                             inc_warmup = FALSE, 
+                             permuted = FALSE)
+model1_po <- as.data.frame(model1_po)
+# there is much left to desire with output in this form, 
+# we mangle this as follows
+model1_po <- as.data.table(model1_po)
+model1_po[, iteration := seq_len(nrow(model1_po))]
+model1_po <- data.table::melt(model1_po, 
+                              id.vars = 'iteration'
+                              )
+set(model1_po, NULL, 'variable', model1_po[, as.character(variable)])
+set(model1_po, NULL, 'chain', model1_po[, gsub('(.*)\\.(.*)','\\1',variable)])
+set(model1_po, NULL, 'chain', model1_po[, as.integer(gsub('chain:','',chain))])
+set(model1_po, NULL, 'variable', model1_po[, gsub('(.*)\\.(.*)','\\2',variable)])
+model1_po <- data.table::dcast(model1_po, 
+                               iteration+chain ~ variable, 
+                               value.var = 'value'
+                               )
+model1_po
+```
+
+# The flat priors example
+
+Let us adapt the Hello World example a wee bit, so that we can explore how a non-successful numerical inference run with `Stan` might look like. 
+
+We will engineer a statistical problem that is very hard to sample from, due to unsuitable prior specifications. First, we will reduce the data to just two data points. Second, we will specify unbounded uniform priors are specified for both $\mu$ and $\sigma$, which says that prior values close to infinity are as likely as close to zero.
+
+The learning outcome here is that a common reason why `Stan` fails to sample from a joint posterior is that the priors are mis-specified as either way too wide, or way too narrow.
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=TRUE, results="hide"} 
+# data now consist of TWO data points ONLY
+y <- c(-1,1)
+stan_data <- list()
+stan_data$N <- length(y)
+stan_data$y <- y
+
+# specify Stan model with flat prior on mu and sigma
+model2_text <- "
+data{
+    int<lower=1> N;
+    real y[N];
+}
+parameters{
+    real mu;
+    real<lower=0> sigma;
+}
+model{
+    y ~ normal( mu , sigma );
+}
+"
+```
+
+Now, let us compile the `Stan` model file, and run `Stan`'s Hamiltonian Monte Carlo algorithm for $1000$ iterations that include $400$ warmup iterations. Setup two Hamiltonian Monte Carlo chains and initialise both chains at $(\mu=0, \sigma=1)$. Then make a trace plot:
+
+```{r, include=!include_solutions, eval=FALSE, echo=!include_solutions, message=FALSE, tidy=FALSE, results="hide"} 
+# TODO compile model
+# model2_compiled <- rstan::stan_model
+
+# TODO run Stan
+# model2_fit <- rstan::sampling
+
+# TODO trace plots
+# po <- rstan:::extract
+```
+
+```{r, include=include_solutions, eval=TRUE, message=FALSE, echo=include_solutions, tidy=FALSE, cache=TRUE, results="hide"} 
+model2_compiled <- rstan::stan_model(
+  model_name = 'model2', 
+  model_code = gsub('\t',' ',model2_text)
+  )
+
+# run Stan
+model2_fit <- rstan::sampling(model2_compiled, 
+  data = stan_data, 
+  warmup = 1e3, iter = 4e3, chains = 2, 
+  init = list( list(mu = 0,sigma = 1),list(mu = 0,sigma = 1) )
+  )
+
+# trace plots
+po <- rstan:::extract(model2_fit, inc_warmup = TRUE, permuted = FALSE)
+bayesplot:::color_scheme_set("mix-blue-pink")
+p <- bayesplot:::mcmc_trace(po,  pars = c("mu", "sigma"), n_warmup = 1e3,
+		facet_args = list(nrow = 2, labeller = label_parsed))
+pdf(file = file.path(out.dir,'model2_trace_flat_prior_N2.pdf'), width = 10, height = 6)
+print(p)
+dev.off()
+```
+
+For comparison, let us now place weakly informative priors on $\mu$ and $\sigma$, and repeat the excercise: 
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=TRUE, results="hide"} 
+# data now TWO data points ONLY
+y <- c(-1,1)
+stan_data <- list()
+stan_data$N <- length(y)
+stan_data$y <- y
+
+# specify Stan model with weakly informative prior on mu and sigma
+model3_text <- "
+data{
+    int<lower=1> N;
+    real y[N];
+}
+parameters{
+    real mu;
+    real<lower=0> sigma;
+}
+model{
+    sigma ~ cauchy( 0 , 1 );
+    mu ~ normal( 0 , 10 );
+    y ~ normal( mu , sigma );
+}
+"
+```
+
+```{r, include=!include_solutions, eval=FALSE, echo=!include_solutions, message=FALSE, tidy=FALSE, results="hide"} 
+# TODO compile model
+# model3_compiled <- rstan::stan_model
+
+# TODO run Stan
+# model3_fit <- rstan::sampling
+
+# TODO trace plots
+# po <- rstan:::extract
+```
+
+```{r, include=include_solutions, eval=TRUE, message=FALSE, echo=include_solutions, tidy=FALSE, cache=TRUE, results="hide"} 
+# compile model
+model3_compiled <- rstan::stan_model(
+  model_name = 'model3', 
+  model_code = gsub('\t',' ',model3_text)
+  )
+
+# run Stan
+model3_fit <- rstan::sampling(model3_compiled, 
+  data = stan_data, 
+  warmup = 1e3, iter = 4e3, chains = 2, 
+  init = list( list(mu = 0,sigma = 1),list(mu = 0,sigma = 1) )
+  )
+
+# trace plots
+po <- rstan:::extract(model3_fit, inc_warmup = TRUE, permuted = FALSE)
+bayesplot:::color_scheme_set("mix-blue-pink")
+p <- bayesplot:::mcmc_trace(po,  pars = c("mu", "sigma"), n_warmup = 1e3,
+		facet_args = list(nrow = 2, labeller = label_parsed))
+pdf(file = file.path(out.dir,'model3_trace_winformative_prior_N2.pdf'), width = 10, height = 6)
+print(p)
+dev.off()
+```
+
+What do you observe in terms of convergence, mixing, and the HMC traces in general?
+
+```{r, include=!include_solutions, eval=FALSE, echo=!include_solutions, tidy=FALSE}
+# TODO
+```
+
+
+# The unidentifiable parameters example
+
+Finally, we will adapt the Hello World example slightly differently, again to explore how a non-successful numerical inference run with `Stan` might look like in the case when two parameters cannot be estimated from the data, only their combination. To engineer this situation, we will introduce two unkown random variables $\alpha_1$ and $\alpha_2$, and say that the sum of both is the mean in our Hello World normal model.
+
+The learning outcome here is that a common reason why `Stan` fails to sample from a joint posterior is that the parameters in a model are highly correlated, and there are multiple equally likely solutions under the model as specified.
+
+Let us start with unbounded uniform priors specified on $\alpha_1$ and $\alpha_2$. 
+
+```{r, include=TRUE, eval=TRUE, message=FALSE, echo=TRUE, tidy=FALSE, cache=TRUE, results="hide"} 
+# data now TWO data points ONLY
+y <- c(-1,1)
+stan_data <- list()
+stan_data$N <- length(y)
+stan_data$y <- y
+
+# specify Stan model with unidentifiable parameters and flat prior
+model4_text <- "
+data{
+    int<lower=1> N;
+    real y[N];
+}
+parameters{
+    real alpha1;
+    real alpha2;
+    real<lower=0> sigma;
+}
+transformed parameters{
+    real mu= alpha1 + alpha2;
+}
+model{
+    sigma ~ cauchy( 0 , 1 );
+    y ~ normal( mu , sigma );
+}
+"
+```
+
+Let us run `Stan`'s Hamiltonian Monte Carlo algorithm for $1000$ iterations that include $400$ warmup iterations. Setup two Hamiltonian Monte Carlo chains and initialise both chains at $(\mu=0, \sigma=1)$. Then make a trace plot:
+
+```{r, include=!include_solutions, eval=FALSE, echo=!include_solutions, message=FALSE, tidy=FALSE, results="hide"} 
+# TODO compile model
+# model4_compiled <- 
+
+# TODO run Stan
+# model4_fit <- 
+
+# TODO trace plots
+# po <- 
+```
+```{r, include=include_solutions, eval=TRUE, message=FALSE, echo=include_solutions, tidy=FALSE, cache=TRUE, results="hide"} 
+model4_compiled <- rstan::stan_model(
+  model_name = 'model4', 
+  model_code = gsub('\t',' ',model4_text)
+  )
+
+# run Stan
+model4_fit <- rstan::sampling(model4_compiled, 
+  data = stan_data, 
+  warmup = 1e3, iter = 4e3, chains = 2, 
+  init = list( list(alpha1 = 0,alpha2 = 0,sigma = 1),list(alpha1 = 0,alpha2 = 0,sigma = 1) )
+  )
+
+# trace plots
+po <- rstan:::extract(model4_fit, inc_warmup = TRUE, permuted = FALSE)
+bayesplot:::color_scheme_set("mix-blue-pink")
+p <- bayesplot:::mcmc_trace(po,  pars = c("mu", "sigma"), n_warmup = 1e3,
+		facet_args = list(nrow = 2, labeller = label_parsed))
+pdf(file = file.path(out.dir,'model4_trace_unidentifiable_flat_prior_N2.pdf'), width = 10, height = 6)
+print(p)
+dev.off()
+```
+
+For comparison, let us now consider a model with weakly informative $\text{Normal}(0,10^2)$ priors on $\alpha_1$ and $\alpha_2$. Again, let us run `Stan`'s Hamiltonian Monte Carlo algorithm for $1000$ iterations that include $400$ warmup iterations. Setup two Hamiltonian Monte Carlo chains and initialise both chains at $(\alpha_1=0, \alpha_2=0, \sigma=1)$. Then make a trace plot, and also a pair plot as shown above:
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=TRUE, results="hide"} 
+# data now consist of TWO data points ONLY
+y <- c(-1,1)
+stan_data <- list()
+stan_data$N <- length(y)
+stan_data$y <- y
+
+# specify Stan model with unidentifiable parameters and weakly informative prior
+model5_text <- "
+data{
+    int<lower=1> N;
+    real y[N];
+}
+parameters{
+    real alpha1;
+    real alpha2;
+    real<lower=0> sigma;
+}
+transformed parameters{
+    real mu= alpha1 + alpha2;
+}
+model{
+    sigma ~ cauchy( 0 , 1 );
+    alpha1 ~ normal(0, 10);
+    alpha2 ~ normal(0, 10);
+    y ~ normal( mu , sigma );
+}
+"
+```
+
+```{r, include=!include_solutions, eval=FALSE, echo=!include_solutions, message=FALSE, tidy=FALSE, results="hide"} 
+# TODO compile the model
+# model5_compiled <- 
+
+# TODO run Stan
+# model5_fit <-
+
+# TODO trace plots
+# po <- 
+#
+# TODO pair plot
+# p <- bayesplot::mcmc_pairs
+```
+
+```{r, include=include_solutions, eval=TRUE, message=FALSE, echo=include_solutions, tidy=FALSE, cache=TRUE, results="hide"} 
+# data now consist of TWO data points ONLY
+model5_compiled <- rstan::stan_model(
+  model_name = 'model5', 
+  model_code = gsub('\t',' ',model5_text)
+  )
+
+# run Stan
+model5_fit <- rstan::sampling(model5_compiled, 
+  data = stan_data, 
+  warmup = 1e3, iter = 4e3, chains = 2, 
+  init = list( list(alpha1 = 0,alpha2 = 0,sigma = 1),list(alpha1 = 0,alpha2 = 0,sigma = 1) )
+  )
+
+# trace plots
+po <- rstan:::extract(model5_fit, inc_warmup = TRUE, permuted = FALSE)
+bayesplot:::color_scheme_set("mix-blue-pink")
+p <- bayesplot:::mcmc_trace(po,  pars = c("mu", "sigma"), n_warmup = 1e3,
+		facet_args = list(nrow = 2, labeller = label_parsed))
+pdf(file = file.path(out.dir,'model5_trace_unidentifiable_winformative_prior_N2.pdf'), width = 10, height = 6)
+print(p)
+dev.off()
+
+# pair plot
+p <- bayesplot::mcmc_pairs(po, diag_fun = "dens", off_diag_fun = "hex")
+ggsave(file = file.path(out.dir,'model5_pair_unidentifiable_winformative_prior_N2.pdf'), p, w = 10, h = 10)
+```
+
+Let us reflect on the trace plots and the pair plots for the different models:
+
+- What do you observe in terms of convergence, mixing, and the HMC traces in general? 
+- What does the pair plot reveal to you?
+
+```{r, include=!include_solutions, eval=FALSE, echo=!include_solutions, tidy=FALSE}
+# TODO
+```
+```{r, include=include_solutions, eval=FALSE, echo=include_solutions, tidy=FALSE}
+# The first observation is that provided that the prior distributions on model parameters are 
+# suitably specified through e.g. weakly informative priors, then Stan's Hamiltonian Monte Carlo 
+# algorithm usually works very well to provide us with Monte Carlo samples from the joint posterior 
+# distribution.
+# 
+# The second observation is related to the pairs plot. We can see that several parameters are 
+# extremely highly correlated. In fact, the posterior alpha1 is essentially equal to -alpha2. 
+# This means that the joint posterior distribution is essentially concentrated on a hyperplane, a set 
+# of measure zero. Yet, Stan's algorithm understands the geometry of the posterior distribution, 
+# and can efficiently sample from it. This would be very difficult with a standard Metropolis 
+# Hastings algorithm.
+```
+
+# Hello world example, using cmdstanr
+
+Finally, we revisit our Hello World example to see how exactly each step above can be implemented with `cmdstanr`:
+
+```{r, include=TRUE, eval=FALSE, message=FALSE, echo=TRUE, warning=FALSE, tidy=TRUE, cache=TRUE}
+require(data.table) # data mangling
+require(tidyverse) # data mangling
+require(bayesplot) # plot Stan output
+require(knitr) # for Rmarkdown
+require(kableExtra) # for Rmarkdown
+require(cmdstanr) # for Stan
+
+# change this line as needed to point to the directory 
+#    where all output from this lab is stored
+out.dir <- '/Users/or105/Library/CloudStorage/OneDrive-ImperialCollegeLondon/OR_Work/teaching/2023-24/2023-24_MScBiomedicalStats/lectures/content_stan_intro'
+
+model1_cmdstan_text <- "
+data{
+    int<lower=1> N;
+    array [N] real y; //using latest Stan syntax
+}
+parameters{
+    real mu;
+    real<lower=0> sigma;
+}
+model{
+    sigma ~ cauchy( 0 , 1 );
+    mu ~ normal( 0 , 10 );
+    y ~ normal( mu , sigma );
+}
+"
+
+#	Make data
+set.seed(010680)	# use your birth date
+y <- rnorm(1e2, mean = 0, sd = 1)
+stan_data <- list()
+stan_data$N <- length(y)
+stan_data$y <- y
+
+# cmdstanr requires the model to be written to a file
+model1_filename <- cmdstanr::write_stan_file(
+  gsub('\t',' ',model1_cmdstan_text),
+  dir = out.dir,
+  basename = NULL,
+  force_overwrite = FALSE,
+  hash_salt = ""
+)
+
+# compile Stan model
+model1_compiled_cmdstanr <- cmdstanr::cmdstan_model(model1_filename)
+
+# sample from joint posterior of the Hello World model with cmdstanr
+model1_fit_cmdstanr <- model1_compiled_cmdstanr$sample(
+  data = stan_data,
+  seed = 123,
+  chains = 2,
+  parallel_chains = 2,
+  refresh = 500, # print update every 500 iters,
+  save_warmup = TRUE,
+  init = list( list(mu = 1,sigma = 2),list(mu = -1, sigma = 0.5) )
+)
+
+# save output to RDS
+model1_fit_cmdstanr$save_object(file = file.path(out.dir, "model1_compiled_cmdstanr.rds"))
+
+# load output from RDS
+model1_fit_cmdstanr <- readRDS(file.path(out.dir, "model1_compiled_cmdstanr.rds"))
+
+model1_pars <- c("mu", "sigma")
+
+# assess mixing and convergence
+model1_fit_cmdstanr$summary(
+  variables = model1_pars,
+  posterior::default_summary_measures(),
+  extra_quantiles = ~posterior::quantile2(., probs = c(.0275, .975))
+)
+
+# to plot traces and assess convergence, 
+# extract Monte Carlo samples including warmup in default array format 
+# that keeps all chains separate
+# 
+# often helpful to plot the log posterior density too
+model1_po <- model1_fit_cmdstanr$draws(
+  variables = c("lp__",model1_pars),
+  inc_warmup = TRUE,
+  format = "draws_array"
+  )
+
+# make trace plot
+p <- bayesplot:::mcmc_trace(model1_po,  
+                            pars = c("lp__",model1_pars), 
+                            n_warmup = 1e3,
+                            facet_args = list(nrow = 2)
+                            )
+pdf(file = file.path(out.dir,'model1_cmdstanr_trace.pdf'), width = 10, height = 8)
+print(p)
+dev.off()
+
+# make pairs plots of samples excluding warmup
+#
+# often helpful to plot the log posterior density too
+model1_po <- model1_fit_cmdstanr$draws(
+  variables = c("lp__",model1_pars),
+  inc_warmup = FALSE,
+  format = "draws_array"
+  ) 
+p <- bayesplot::mcmc_pairs(model1_po, 
+                           pars = c("lp__",model1_pars), 
+                           off_diag_args = list(size = 0.3, alpha = 0.3)
+                           )
+ggsave(file = file.path(out.dir,'model1_cmdstanr_pairsplot.png'), 
+       plot = p, 
+       h = 20, 
+       w = 20, 
+       limitsize = FALSE
+       )
+
+# to manipulate the posterior Monte Carlo samples after warmup
+# we typically prefer to
+# extract Monte Carlo samples as a data frame
+model1_pars <- c("mu", "sigma")
+model1_po <- model1_fit_cmdstanr$draws(
+  variables = model1_pars,
+  inc_warmup = FALSE,
+  format = "draws_df"
+  ) 
+model1_po <- as.data.table(model1_po)
+setnames(model1_po, names(model1_po), gsub("\\.","",names(model1_po)))
+```
