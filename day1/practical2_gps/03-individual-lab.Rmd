@@ -1,0 +1,691 @@
+---
+title: |
+  ![](images\IMP_ML_K_PS_CLEAR-SPACE2.png){height=14mm}
+  ![](images\MLGHN_Logo_colour.png){height=16mm}
+  <br><br>
+  Computing lab: Non-parametric modelling with Gaussian Processes and approximations
+subtitle: 'North-South-AIMS-Imperial: modern statistics and global health'
+author: "Shozen Dan and Oliver Ratmann<br><br>"
+#output: pdf_document 
+output: 
+  bookdown::html_document2:
+    toc: TRUE
+    toc_float: TRUE
+    highlight: tango
+  bookdown::pdf_book:
+    keep_tex: yes
+---
+
+<style type="text/css">
+h1{
+  font-size: 24pt;
+}
+h2{
+  font-size: 18pt;
+}
+body{
+  font-size: 12pt;
+}
+</style>
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+include_solutions <- FALSE
+```
+
+# Study objectives
+Hello all!
+
+The objective of this lab is to gain experience and familiarity in implementing computationally scalable non-parametric Bayesian normal linear regression models with `Stan`.
+
+Let us revisit one more time the wildfire data from our previous computing lab, in which we calculated the point prevalence of US land on fire per calendar month: 
+
+```{r, out.width='90%',include=TRUE, echo=FALSE, eval=TRUE, fig.align="center"}
+out.dir <- 'outputs'
+# knitr::include_graphics(file.path(out.dir,'US_wild_fires_prevalence.png'))
+```
+
+Previously, we noted seasonal fluctuations in wildfire prevalence and modelled these with a linear year effect and further independent effects for each month. In this lab, we will model the monthly effects with random functions, and give these random function a Gaussian process prior with squared exponential kernel, or alternatively a computationally more scalable Hilbert-Space Gaussian process prior with squared exponential kernel.
+
+# Load packages
+```{r, include=TRUE, eval=TRUE, message=FALSE, echo=TRUE, warning=FALSE, tidy=TRUE}
+require(data.table) # data mangling
+require(rstan)
+require(ggplot2) #for general plotting
+require(ggsci) #for color palettes used by scientific journals
+require(bayesplot) # plot Stan output
+require(knitr)
+require(kableExtra)
+require(posterior)
+
+data.dir <- 'data'
+out.dir <- 'outputs'
+```
+
+# Data
+
+Let us load the data and consider log wildfire prevalence as before:
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=FALSE} 
+# load wildfire prevalence from lab 1
+file <- file.path(data.dir,'US_wild_fires_prevalence.rds')
+wfp <- readRDS(file)
+land_area <- wfp[1, LANDAREA]
+# select variables needed to answer study question
+wfp <- subset(wfp, select = c(FIRE_YEAR, MONTH, PREVALENCE))
+str(wfp)
+
+# set up log prevalence as response variable for a normal regression model
+wfp[, LOG_PREV := wfp[, log(PREVALENCE)] ]
+
+# set up year covariate
+wfp[, FIRE_YEAR_2 := log(FIRE_YEAR)]
+wfp[, FIRE_YEAR_2 := (FIRE_YEAR_2 - mean(FIRE_YEAR_2))/sd(FIRE_YEAR_2) ]
+```
+
+To model month effects non-parametrically, we need to setup an index that associates the value of our random function $f$ for a particular month with each observation. We will also need to define standardised inputs for our random function that is supposed to capture month effects:
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=FALSE} 
+# index that associates the value of our random function to each observation
+set(wfp, NULL, 'MONTH', wfp[, as.integer(MONTH)])
+
+# define standardised inputs, so off-the-shelf GP priors can be used
+wfp[, INPUT := MONTH/12]
+wfp[, INPUT_2 := (INPUT - mean(INPUT))/sd(INPUT)]
+
+# add observation index for easy post-processing
+setkey(wfp, FIRE_YEAR, MONTH)
+wfp[, IDX := seq_len(nrow(wfp))]
+```
+
+# Non-parametric modelling with GPs
+
+Let us denote by $y_i$ the log wildfire prevalence in the $i$th observation. 
+
+Previously, we modeled $y_i$ with
+\begin{align*}
+& y_i \sim \text{Normal}(\mu_i, \sigma^2) \\
+& \mu_i = \beta_0 + \beta_1 X_{i1} + \cdots + \beta_{13} X_{i13} \\
+& \beta_0 \sim \text{Normal}(0, 100) \\
+& \beta_j \sim \text{Normal}(0, 1) \\
+& \sigma \sim \text{Half-Cauchy}(0,1)
+\end{align*}
+where $X_{ij}$, $j=1,\dotsc,12$ are binary indicators that evaluate to $1$ if the $i$th observation corresponds to the $j$th month in a year and $X_{i13}$ is the standardized log year associated with the $i$th observation.
+
+Now, we model $y_i$ with
+\begin{align*}
+& y_i \sim \text{Normal}(\mu_i, \sigma^2) \\
+& \mu_i = \beta_0 + \beta_1 X_{i1} + f(\text{month}_i) \\
+& \beta_0 \sim \text{Normal}(0, 100) \\
+& \beta_1 \sim \text{Normal}(0, 1) \\
+& f \sim \text{GP}(\alpha, \rho) \\
+& \alpha \sim \text{Half-Cauchy}(0, 1) \\
+& \rho \sim \text{Inv-Gamma}(5, 1) \\
+& \sigma \sim \text{Half-Cauchy}(0,1)
+\end{align*}
+where $X_{i1}$ is the standardized log year associated with the $i$th observation and so $\beta_1$ models a linear annual effect, and $f$ is a random function that is evaluated at monthly inputs and so captures month effects non-parametrically. The random function is give a zero-mean GP prior with squared exponential kernel with GP variance $\alpha$ and lengthscale $\rho$. The hyperparameters $\alpha$, $\rho$ are given default priors that are suitable for a standardised input domain $[0,1]$.
+
+Here is the `Stan` model file. 
+
+Note that the joint distribution of $f$ evaluated at a finite set of inputs is just a multivariate normal, and so we can straightforwardly generate samples from $f$ through linear transformation of iid standard normal random variables (through the line $f = L_f * z$).
+
+Note also that the variance-covariance matrix must not contain zeros, and so $f$ can only be evaluated at unique inputs. I chose to model month effects through random functions to make this point clear. Be sure you understand how the values of $f$ at the unique, standardised inputs that represent months are mapped back to each observation in the line `mu = beta0 + X * beta + f[map_unique_inputs_to_obs];`.
+
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=FALSE, results='hide'} 
+# compile Stan model
+wfp_gp_model <- rstan::stan_model("stan_models/wfp_gp.stan", model_name = "wfp_gp")
+```
+Let us fit the model to our wildfire data. The map from $f$ evaluated at monthly inputs is just the months $1, 2, \dotsc$ associated with each observation:
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=FALSE} 
+# define data in format needed for model specification
+stan_data <- list()
+stan_data$N <- nrow(wfp)
+stan_data$X <- unname(as.matrix(subset(wfp, select = FIRE_YEAR_2)))
+stan_data$K <- ncol(stan_data$X)
+stan_data$y <- wfp$LOG_PREV
+stan_data$NI <- 12
+stan_data$inputs_standardised <- unique(sort(wfp$INPUT_2))
+stan_data$map_unique_inputs_to_obs <- wfp$MONTH
+
+# sample from joint posterior of the Hello World model with cmdstanr
+# I initialized the sampler at values to help avoid -Inf likelihood evaluations 
+wfp_gp_fit <- rstan::sampling(wfp_gp_model,
+                              data = stan_data,
+                              seed = 123,
+                              chains = 2,
+                              cores = 2,
+                              warmup = 500,
+                              iter = 2000,
+                              init = list(
+                                list(beta0 = -9, gp_sigma = 1, gp_lengthscale = .5, sigma = 1),
+                                list(beta0 = -9, gp_sigma = 1, gp_lengthscale = .5, sigma = 1) 
+                              ))
+
+# save output to RDS
+saveRDS(wfp_gp_fit, file = file.path(out.dir, "wfp_gp_fit.rds"))
+```
+
+GP lengthscales, that are very close to zero or are very large relative to the input domain, can often be associated with divergent transitions in the HMC sampler. With the above prior choice on $\rho$, you should find few if any divergent transitions, and can safely proceed if this is so. 
+
+As always we inspect convergence and mixing: 
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=FALSE} 
+# load output from RDS
+wfp_gp_fit <- readRDS(file.path(out.dir, "wfp_gp_fit.rds"))
+
+# ====== Define a helper function to perform diagnostics =====
+make_diagnostic_summary <- function(stan_fit, pars) {
+  # Extract the samples of the parameters
+  po_draws <- rstan::extract(stan_fit, pars = pars)
+  
+  # Coherce them into a format that is easier to work with
+  po_draws <- posterior::as_draws(po_draws)
+  
+  # Make a summary table
+  sum_tbl <- summary(
+    po_draws,
+    posterior::default_summary_measures(),
+    extra_quantiles = ~posterior::quantile2(., probs = c(.0275, .975)),
+    posterior::default_convergence_measures()
+  )
+  
+  return(sum_tbl)
+}
+# =============================================================
+
+# A vector containing the names of parameters we want to extract
+model_pars <- c("beta0", "beta", "sigma", "gp_lengthscale", "gp_sigma")
+
+sum_tbl <- make_diagnostic_summary(wfp_gp_fit, model_pars)
+# print summaries
+kableExtra::kbl(sum_tbl, digits = 3) %>%
+    kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed"), font_size = 12)
+```
+
+There are many parameters, so let us explore only the trace of the model parameter with lowest effective sample size. It is common that posterior GP lengthscales are hard to mix, and we can observe some autocorrelation, though the extent of autocorrelation remains really very low and we would not be concerned about the levels seen:
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=FALSE} 
+# plot traces of parameter with smallest ess_bulk
+# ===== Define a function to help us plot trace plots =====
+plot_min_ess_trace <- function(stan_fit, sum_tbl) {
+  var_ess_min <- sum_tbl$variable[which.min(sum_tbl$ess_bulk)]
+  
+  # often helpful to plot the log posterior density too
+  po_draws <- rstan::extract(stan_fit,
+                             pars = c("lp__", var_ess_min),
+                             inc_warmup = TRUE)
+  po_draws <- posterior::as_draws(po_draws)
+  
+  p <- bayesplot:::mcmc_trace(po_draws,  
+                              pars = c("lp__", var_ess_min), 
+                              n_warmup = 500,
+                              facet_args = list(nrow = 2))
+  
+  return(p)
+}
+# ==========================================================
+
+p <- plot_min_ess_trace(wfp_gp_fit, sum_tbl)
+ggsave(file = file.path(out.dir,'wfp_gp_worst_trace.png'), p, width = 12, height = 10)
+```
+
+```{r, out.width='90%',include=TRUE, echo=FALSE, eval=TRUE, fig.align="center"}
+knitr::include_graphics(file.path(out.dir,'wfp_gp_worst_trace.png'))
+```
+
+Let us practice post-processing key aspects of our non-parametric Bayesian model. 
+
+A very common task is to obtain posterior median estimates and 95\% credible intervals from target quantities. Here, we will focus as target quantity on the median wildfire prevalence $\exp(\mu(t))$ evaluated at our time inputs. Remember the golden rule shown below: 
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=FALSE}
+# ====== Define a function to help us with extracting the draws =====
+extract_posterior_draws <- function(stan_fit, par) {
+  # Extract draws for a specific parameter
+  po_draws <- rstan::extract(stan_fit,
+                             pars = par,
+                             permuted = TRUE,
+                             inc_warmup = FALSE)
+  
+  # Coerse into a format that is easier to work with
+  po_draws <- posterior::as_draws_df(po_draws[[par]])
+  dt_po <- as.data.table(po_draws)
+  setnames(dt_po, names(po_draws), gsub("\\.","", names(po_draws)))
+  
+  # extract indices of mu as column in data.table
+  dt_po <- data.table::melt(dt_po, 
+                            id.vars = c('draw','chain','iteration'))
+  set(dt_po, NULL, 'variable', dt_po[, as.character(variable)])
+  set(dt_po, NULL, 'IDX', dt_po[, as.integer(gsub('(.*)\\[(.*)\\]','\\2',variable))])
+  set(dt_po, NULL, 'variable', dt_po[, gsub('(.*)\\[(.*)\\]','\\1',variable)])
+  
+  return(dt_po)
+}
+
+
+# extract Monte Carlo samples of joint posterior and transformed parameter mu
+dt_po <- extract_posterior_draws(wfp_gp_fit, "mu")
+
+# golden rule: first transform, then summarize!
+dt_po[, median_prevalence := exp(value)]
+dt_po_sum <- dt_po[, list(
+  V = quantile(median_prevalence, probs = c(0.5, 0.025, 0.975)),
+  STAT = c('M','CL','CU') 
+), by = c('IDX')]
+dt_po_sum <- dcast.data.table(dt_po_sum, IDX ~ STAT, value.var = 'V')
+
+dt_po_sum <- merge(wfp, dt_po_sum, by = 'IDX')
+dt_po_sum[, DATE := as.Date(paste0(FIRE_YEAR,'-',MONTH,'-15'))]
+```
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=FALSE} 
+# plot posterior median point estimates and 95% CRI
+p <- ggplot(dt_po_sum, aes(x = DATE)) + 
+  geom_point(aes(y = M), colour = 'darkorange', shape = 1) +
+  geom_linerange(aes(ymin = CL, ymax = CU), colour = 'darkorange', linewidth = 0.4) +
+  geom_line(aes(y = PREVALENCE)) +
+  geom_point(aes(y = PREVALENCE)) +
+  scale_x_date(date_breaks = '6 months') +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = '', y = 'US land area on fire') +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45,vjust = 1,hjust = 1))
+
+ggsave(file = file.path(out.dir,'US_wild_fires_prevalence_gp_linerange.png'), p, w = 12, h = 6)
+```
+
+```{r, out.width='90%',include=TRUE, echo=FALSE, eval=TRUE, fig.align="center"}
+knitr::include_graphics(file.path(out.dir,'US_wild_fires_prevalence_gp_linerange.png'))
+```
+
+Another common task is to plot a few realizations of random functions. We will again focus on the random function that corresponds to median wildfire prevalence $\exp(\mu(t))$, that is induced through the random function of month effect plus linear year effects. Note the minor variations in the magnitude and shape of the random functions:
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=FALSE} 
+# plot sample of 4 random functions evaluated at monthly inputs
+tmp <- sort(sample(max(dt_po$draw), 4))
+tmp <- data.table(draw = tmp)
+tmp <- merge(tmp, dt_po, by = 'draw')
+tmp[, median_prevalence := exp(value)]
+tmp <- merge(wfp, tmp, by = 'IDX')
+tmp[, DATE := as.Date(paste0(FIRE_YEAR,'-',MONTH,'-15'))]
+```
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=FALSE} 
+p <- ggplot(tmp, aes(x = DATE)) + 
+  geom_line(aes(y = median_prevalence), colour = 'darkorange') +
+  geom_line(aes(y = PREVALENCE), colour = 'black') +
+  scale_x_date(date_breaks = '6 months') +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = '', y = 'US land area on fire') +
+  facet_wrap(~draw, ncol = 2) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45,vjust = 1,hjust = 1))
+ggsave(file = file.path(out.dir,'US_wild_fires_prevalence_gp_random_functions.png'), p, w = 12, h = 12)
+```
+```{r, out.width='90%',include=TRUE, echo=FALSE, eval=TRUE, fig.align="center"}
+knitr::include_graphics(file.path(out.dir,'US_wild_fires_prevalence_gp_random_functions.png'))
+```
+
+To help understand how the model works and/or inspect potential coding issues, it can also be useful to inspect the estimated shape of the random functions evaluated on the standardized inputs:
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=FALSE} 
+# plot the fitted GP
+tmp <- sort(sample(max(dt_po$draw), 100))
+tmp <- data.table(draw = tmp)
+tmp[, SAMPLE_IDX := seq_len(nrow(tmp))]
+
+dt_po_f <- extract_posterior_draws(wfp_gp_fit, "f")
+
+tmp <- merge(tmp, dt_po_f, by = 'draw')
+setnames(tmp, 'IDX', 'MONTH')
+tmp <- merge(tmp, unique(subset(wfp, select = c(MONTH, INPUT_2))), by = 'MONTH')
+set(tmp, NULL, 'draw', tmp[, factor(draw)])
+
+p <- ggplot(tmp, aes(x = INPUT_2, colour = draw)) + 
+  geom_line(aes(y = value)) +
+  labs(x = 'standardised inputs', y = 'value of HSGP') +
+  theme_bw() 
+ggsave(file = file.path(out.dir,'gp_random_functions.png'), p, w = 12, h = 6)
+```
+```{r, out.width='90%',include=TRUE, echo=FALSE, eval=TRUE, fig.align="center"}
+knitr::include_graphics(file.path(out.dir,'gp_random_functions.png'))
+```
+
+
+# Non-parametric modelling with HSGPs
+
+Let us now model $y_i$ using computationally scalable Hilbert-Space GP approximations:
+
+\begin{align*}
+& y_i \sim \text{Normal}(\mu_i, \sigma^2) \\
+& \mu_i = \beta_0 + \beta_1 X_{i1} + f(\text{month}_i) \\
+& \beta_0 \sim \text{Normal}(0, 100) \\
+& \beta_1 \sim \text{Normal}(0, 1) \\
+& f \sim \text{HSGP}(\alpha, \rho) \\
+& \alpha \sim \text{Half-Cauchy}(0, 1) \\
+& \rho \sim \text{Inv-Gamma}(5, 1) \\
+& \sigma \sim \text{Half-Cauchy}(0,1)
+\end{align*}
+where $X_{i1}$ is the standardized log year associated with the $i$th observation and so $\beta_1$ models a linear annual effect, and $f$ is a random function that is evaluated at monthly inputs and so captures month effects non-parametrically. The random function is given a zero-mean HSGP prior with squared exponential kernel with GP variance $\alpha$ and lengthscale $\rho$. The hyper-parameters $\alpha$, $\rho$ are given default priors that are suitable for a standardised input domain $[0,1]$. 
+
+Here is the `Stan` model file. 
+
+Note how the HSGP basis functions are precomputed at the standardised inputs once and for all in the `transformed data` block, and how the HSGP approximation is constructed through relatively cheap matrix multiplications.
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=FALSE} 
+# compile Stan model
+wfp_hsgp_model <- rstan::stan_model("stan_models/wfp_hsgp.stan", model_name = "wfp_hsgp")
+```
+For the purposes of this lab with specify the HSGP boundary factor to $1.2$ and the number of HSGP basis functions to $30$, but see [the paper "Practical Hilbert space approximate Bayesian Gaussian processes for probabilistic programming"](https://link.springer.com/article/10.1007/s11222-022-10167-2) for more details.
+
+In this application, the variance-covariance matrix at the inputs is just a $12 \times 12$ matrix, and so you won't notice any computational speedups when using HSGPs:
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=FALSE, results='hide'} 
+# define data in format needed for model specification
+stan_data <- list()
+stan_data$N <- nrow(wfp)
+stan_data$X <- unname(as.matrix(subset(wfp, select = FIRE_YEAR_2)))
+stan_data$K <- ncol(stan_data$X)
+stan_data$y <- wfp$LOG_PREV
+stan_data$hsgp_c <- 1.2
+stan_data$hsgp_M <- 30
+stan_data$NI <- 12
+stan_data$inputs_standardised <- unique(sort(wfp$INPUT_2))
+stan_data$map_unique_inputs_to_obs <- wfp$MONTH
+
+# sample from joint posterior of the Hello World model with cmdstanr
+wfp_hsgp_fit <- rstan::sampling(wfp_hsgp_model,
+                              data = stan_data,
+                              seed = 123,
+                              chains = 2,
+                              cores = 2,
+                              warmup = 500,
+                              iter = 2000,
+                              init = list(
+                                list(beta0 = -9, gp_sigma = 1, gp_lengthscale = .5, sigma = 1),
+                                list(beta0 = -9, gp_sigma = 1, gp_lengthscale = .5, sigma = 1) 
+                              ))
+
+saveRDS(wfp_hsgp_fit, file = file.path(out.dir, "wfp_hsgp_fit.rds"))
+```
+You will once more note a few divergent transitions. We will ignore these for now, however if you are interested in learning more, consider [the Stan primer on divergent transitions](https://mc-stan.org/misc/warnings.html).
+
+As always we inspect convergence and mixing:
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=FALSE} 
+# load output from RDS
+wfp_hsgp_fit <- readRDS(file.path(out.dir, "wfp_hsgp_fit.rds"))
+model_pars <- c("beta0", "beta", "sigma", "gp_lengthscale", "gp_sigma")
+
+sum_tbl <- make_diagnostic_summary(wfp_hsgp_fit, model_pars)
+
+# print summaries
+kableExtra::kbl(sum_tbl, digits = 3) %>%
+    kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed"), font_size = 12)
+```
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=FALSE} 
+# plot traces of parameter with smallest ess_bulk
+# often helpful to plot the log posterior density too
+p <- plot_min_ess_trace(wfp_hsgp_fit, sum_tbl)
+ggsave(file = file.path(out.dir,'wfp_hsgp_model_worst_trace.png'), p, w = 12, h = 10)
+```
+```{r, out.width='90%',include=TRUE, echo=FALSE, eval=TRUE, fig.align="center"}
+knitr::include_graphics(file.path(out.dir,'wfp_hsgp_model_worst_trace.png'))
+```
+
+The code for summarising Monte Carlo samples of target quantities to posterior median estimates and 95\% credible intervals, and for plotting samples of random functions is exactly the same as before. The main point is that the HSGP priors induce qualitatively very similar statistical behaviors as the GP priors, and in larger dimensions are substantially computationally faster to evaluate. Get familiar with the code, so you can use it for your own purposes.
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=FALSE} 
+# extract Monte Carlo samples of joint posterior and transformed parameter mu
+dt_po_mu <- extract_posterior_draws(wfp_hsgp_fit, "mu")
+
+# summarize posterior median prevalence, and merge with data and inputs
+dt_po_mu[, median_prevalence := exp(value)]
+dt_po_mu_sum <- dt_po_mu[, list(
+  V = quantile(median_prevalence, probs = c(0.5, 0.025, 0.975)),
+  STAT = c('M','CL','CU') 
+), by = c('IDX')]
+dt_po_mu_sum <- dcast.data.table(dt_po_mu_sum, IDX ~ STAT, value.var = 'V')
+dt_po_mu_sum <- merge(wfp, dt_po_mu_sum, by = 'IDX')
+dt_po_mu_sum[, DATE := as.Date(paste0(FIRE_YEAR,'-',MONTH,'-15'))]
+
+# plot posterior median point estimates and 95% CRI
+p <- ggplot(dt_po_mu_sum, aes(x = DATE)) + 
+  geom_point(aes(y = M), colour = 'darkorange', shape = 1) +
+  geom_linerange(aes(ymin = CL, ymax = CU), colour = 'darkorange', linewidth = 0.4) +
+  geom_line(aes(y = PREVALENCE)) +
+  geom_point(aes(y = PREVALENCE)) +
+  scale_x_date(date_breaks = '6 months') +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = '', y = 'US land area on fire') +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+ggsave(file = file.path(out.dir,'US_wild_fires_prevalence_hsgp_linerange.png'), p, w = 12, h = 6)
+```
+```{r, out.width='90%',include=TRUE, echo=FALSE, eval=TRUE, fig.align="center"}
+knitr::include_graphics(file.path(out.dir,'US_wild_fires_prevalence_hsgp_linerange.png'))
+```
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=FALSE} 
+# plot sample of 4 random functions evaluated at monthly inputs
+tmp <- sort(sample(max(dt_po_mu$draw), 4))
+tmp <- data.table(draw = tmp)
+tmp <- merge(tmp, dt_po_mu, by = 'draw')
+tmp[, median_prevalence := exp(value)]
+tmp <- merge(wfp, tmp, by = 'IDX')
+tmp[, DATE := as.Date(paste0(FIRE_YEAR,'-',MONTH,'-15'))]
+p <- ggplot(tmp, aes(x = DATE)) + 
+  geom_line(aes(y = median_prevalence), colour = 'darkorange') +
+  geom_line(aes(y = PREVALENCE), colour = 'black') +
+  scale_x_date(date_breaks = '6 months') +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = '', y = 'US land area on fire') +
+  facet_wrap(~draw, ncol = 2) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45,vjust = 1,hjust = 1))
+
+ggsave(file = file.path(out.dir,'US_wild_fires_prevalence_hsgp_random_functions.png'), p, w = 12, h = 12)
+```
+```{r, out.width='90%',include=TRUE, echo=FALSE, eval=TRUE, fig.align="center"}
+knitr::include_graphics(file.path(out.dir,'US_wild_fires_prevalence_hsgp_random_functions.png'))
+```
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=FALSE} 
+# plot the fitted GP
+tmp <- sort(sample(max(dt_po_f$draw), 100))
+tmp <- data.table(draw = tmp)
+tmp[, SAMPLE_IDX := seq_len(nrow(tmp))]
+tmp <- merge(tmp, dt_po_f, by = 'draw')
+setnames(tmp, 'IDX', 'MONTH')
+tmp <- merge(tmp, unique(subset(wfp, select = c(MONTH, INPUT_2))), by = 'MONTH')
+set(tmp, NULL, 'draw', tmp[, factor(draw)])
+
+p <- ggplot(tmp, aes(x = INPUT_2, colour = draw)) + 
+  geom_line(aes(y = value)) +
+  labs(x = 'standardised inputs', y = 'value of HSGP') +
+  theme_bw() 
+ggsave(file = file.path(out.dir,'hsgp_random_functions.png'), p, w = 12, h = 6)
+```
+```{r, out.width='90%',include=TRUE, echo=FALSE, eval=TRUE, fig.align="center"}
+knitr::include_graphics(file.path(out.dir,'hsgp_random_functions.png'))
+```
+
+# A better model?
+
+Our previous plots of the estimated median wildfire prevalence clearly show that our model fails to reproduce the precise seasonal features in wildfire prevalence. Wildfire prevalence is more irregular from year to year as we currently model, and the occasional explosive peaks seen in the data are not captured by our model. 
+
+How could the model be improved? 
+
+For example, how about adding iid annual effects? See if you can give it a go.
+
+```{r, include=!include_solutions, eval=FALSE, echo=!include_solutions, tidy=FALSE}
+# TODO define year index and add year index to wfp
+
+# TODO define data in format needed for model specification
+# stan_data <- 
+
+# TODO use the previous Stan model on this new data set
+# wfp_hsgp_2_fit <- rstan::sampling(wfp_hsgp_model,
+#                                   data = stan_data,
+#                                   seed = 123,
+#                                   chains = 2,
+#                                   cores = 2,
+#                                   warmup = 500,
+#                                   iter = 5000,
+#                                   refresh = 500,
+#                                   init = list(list(beta0 = -9, gp_sigma = 1, gp_lengthscale = .5, sigma = 1),
+#                                               list(beta0 = -9, gp_sigma = 1, gp_lengthscale = .5, sigma = 1)))
+
+# TODO reproduce earlier analyses
+```
+
+
+```{r, include=include_solutions, eval=include_solutions, echo=include_solutions, tidy=FALSE, cache=FALSE, results='hide'}
+# Here is one possible modelling attempt. 
+# 
+# The main learning outcome is that the same Stan model can be used as a template to 
+# accommodate a larger number of different statistical models. Of course, this is not
+# a coincidence. When you design a new Stan model, keep generality in mind as other users
+# may wish to use the model in many ways - often in ways that you did not anticipate.
+# 
+# define year index and add year index to wfp
+tmp <- unique(subset(wfp, select = FIRE_YEAR))
+tmp[, FIRE_YEAR_COL := paste0('yr_',FIRE_YEAR)]
+tmp[, DUMMY := 1L]
+tmp <- data.table::dcast(tmp, FIRE_YEAR~FIRE_YEAR_COL, value.var = 'DUMMY', fill = 0L)
+wfp <- merge(wfp, tmp, by = 'FIRE_YEAR')
+
+# define data in format needed for model specification
+stan_data <- list()
+stan_data$N <- nrow(wfp)
+stan_data$X <- unname(as.matrix(subset(wfp, select = paste0('yr_',1992:2016))))
+stan_data$K <- ncol(stan_data$X)
+stan_data$y <- wfp$LOG_PREV
+stan_data$hsgp_c <- 1.2
+stan_data$hsgp_M <- 30
+stan_data$NI <- 12
+stan_data$inputs_standardised <- unique(sort(wfp$INPUT_2))
+stan_data$map_unique_inputs_to_obs <- wfp$MONTH
+
+# sample from joint posterior of the Hello World model with rstan
+# There will be more divergent transitions now, though let us ignore these for the time being.
+wfp_hsgp_2_fit <- rstan::sampling(wfp_hsgp_model,
+                                  data = stan_data,
+                                  seed = 123,
+                                  chains = 2,
+                                  cores = 2,
+                                  warmup = 500,
+                                  iter = 5000,
+                                  refresh = 500,
+                                  init = list(list(beta0 = -9, gp_sigma = 1, gp_lengthscale = .5, sigma = 1),
+                                              list(beta0 = -9, gp_sigma = 1, gp_lengthscale = .5, sigma = 1)))
+
+# save output to RDS
+saveRDS(wfp_hsgp_2_fit, file = file.path(out.dir, "wfp_hsgp_2_fit.rds"))
+```
+
+
+```{r, include=include_solutions, eval=include_solutions, echo=include_solutions, tidy=FALSE, cache=FALSE}
+# load output from RDS
+wfp_hsgp_2_fit <- readRDS(file.path(out.dir, "wfp_hsgp_2_fit.rds"))
+
+model_pars <- c("beta0", "sigma", "gp_lengthscale", "gp_sigma")
+
+# assess mixing and convergence
+sum_tbl <- make_diagnostic_summary(wfp_hsgp_2_fit, model_pars)
+# sum_tbl_beta <- make_diagnostic_summary(wfp_hsgp_2_fit, "beta")
+
+# print summaries
+kableExtra::kbl(sum_tbl, digits = 3) %>%
+    kableExtra::kable_styling(bootstrap_options = c("striped", "hover", "condensed"), font_size = 12)
+```
+
+
+```{r, include=include_solutions, eval=include_solutions, echo=include_solutions, tidy=FALSE, cache=FALSE}
+# plot traces of parameter with smallest ess_bulk
+# often helpful to plot the log posterior density too
+p <- plot_min_ess_trace(wfp_hsgp_2_fit, sum_tbl)
+ggsave(file = file.path(out.dir,'wfp_hsgp_model2_worst_trace.png'), p, w = 12, h = 10)
+```
+
+```{r, out.width='90%',include=include_solutions, echo=FALSE, eval=include_solutions, fig.align="center"}
+knitr::include_graphics(file.path(out.dir,'wfp_hsgp_model2_worst_trace.png'))
+```
+
+```{r, include=include_solutions, eval=include_solutions, echo=include_solutions, tidy=FALSE, cache=FALSE}
+# extract Monte Carlo samples of joint posterior and transformed parameter mu
+dt_po_mu <- extract_posterior_draws(wfp_hsgp_2_fit, "mu")
+
+# summarize posterior median prevalence, and merge with data and inputs
+dt_po_mu[, median_prevalence := exp(value)]
+dt_po_mu_sum <- dt_po_mu[, list(
+  V = quantile(median_prevalence, probs = c(0.5, 0.025, 0.975)),
+  STAT = c('M','CL','CU') 
+), by = c('IDX')]
+dt_po_mu_sum <- dcast.data.table(dt_po_mu_sum, IDX ~ STAT, value.var = 'V')
+dt_po_mu_sum <- merge(wfp, dt_po_mu_sum, by = 'IDX')
+dt_po_mu_sum[, DATE := as.Date(paste0(FIRE_YEAR, '-', MONTH, '-15'))]
+
+# plot posterior median point estimates and 95% CRI
+p <- ggplot(dt_po_mu_sum, aes(x = DATE)) + 
+  geom_point(aes(y = M), colour = 'darkorange', shape = 1) +
+  geom_linerange(aes(ymin = CL, ymax = CU), colour = 'darkorange', linewidth = 0.4) +
+  geom_line(aes(y = PREVALENCE)) +
+  geom_point(aes(y = PREVALENCE)) +
+  scale_x_date(date_breaks = '6 months') +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = '', y = 'US land area on fire') +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45,vjust = 1,hjust = 1))
+
+ggsave(file = file.path(out.dir,'US_wild_fires_prevalence_hsgp_linerange_2.png'), p, w = 12, h = 6)
+
+# you should find that overall model fit seems to have improved but remains imperfect.
+# 
+# we will study principled approaches to quantify goodness of fit at a later point,
+# so watch this space.
+```
+```{r, out.width='90%',include=include_solutions, echo=FALSE, eval=include_solutions, fig.align="center"}
+knitr::include_graphics(file.path(out.dir,'US_wild_fires_prevalence_hsgp_linerange_2.png'))
+```
+
+```{r, include=include_solutions, eval=include_solutions, echo=include_solutions, tidy=FALSE, cache=FALSE}
+# an common tool for assessing model fit are posterior predictive checks
+# we will study these at a later point in the module
+# 
+# the purpose of including the posterior predictive checks here is to illustrate that 
+# the model fits log prevalence reasonably well!
+# 
+# the main issue lies in the fact that we did not model the primary data, and 
+# so predictions and forecasts on the data scale are fraught with complications
+df_po_yhat <- extract_posterior_draws(wfp_hsgp_2_fit, "yhat")
+
+# summarize posterior prediction
+df_po_yhat_sum <- df_po_yhat[, list(
+  V = quantile(value, probs = c(0.5, 0.025, 0.975)),
+  STAT = c('M','CL','CU') 
+), by = c('IDX')]
+df_po_yhat_sum <- dcast.data.table(df_po_yhat_sum, IDX~STAT, value.var = 'V')
+df_po_yhat_sum <- merge(wfp, df_po_yhat_sum, by = 'IDX')
+df_po_yhat_sum[, DATE := as.Date(paste0(FIRE_YEAR,'-',MONTH,'-15'))]
+
+# posterior predictive check
+df_po_yhat_sum[, mean(LOG_PREV >= CL & LOG_PREV <= CU)]
+
+# plot posterior median point estimates and 95% CRI
+p <- ggplot(df_po_yhat_sum, aes(x = DATE)) + 
+  geom_point(aes(y = M), colour = 'darkred', shape = 1) +
+  geom_linerange(aes(ymin = CL, ymax = CU), colour = 'darkred', linewidth = 0.4) +
+  geom_point(aes(y = LOG_PREV)) +
+  scale_x_date(date_breaks = '6 months') +
+  labs(x = '', y = 'log prevalence of US land area on fire') +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45,vjust = 1,hjust = 1))
+
+ggsave(file = file.path(out.dir,'US_wild_fires_prevalence_hsgp_postpred_2.png'), p, w = 12, h = 6)
+```
