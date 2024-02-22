@@ -1,0 +1,427 @@
+---
+title: |
+  ![](images/IMP_ML_K_PS_CLEAR-SPACE2.png){height=14mm}
+  ![](images/MLGHN_Logo_colour.png){height=16mm}
+  <br><br>
+  Computing lab: Bayesian normal fixed effects regression models
+subtitle: 'North-South-AIMS-Imperial: modern statistics and global health'
+author: "Shozen Dan and Oliver Ratmann<br><br>"
+#output: pdf_document 
+output: 
+  bookdown::html_document2:
+    toc: TRUE
+    toc_float: TRUE
+    highlight: tango
+  bookdown::pdf_book:
+    keep_tex: yes
+---
+
+<style type="text/css">
+h1{
+  font-size: 24pt;
+}
+h2{
+  font-size: 18pt;
+}
+body{
+  font-size: 12pt;
+}
+</style>
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+include_solutions <- TRUE
+```
+
+# Load packages
+```{r, include=TRUE, eval=TRUE, message=FALSE, echo=TRUE, warning=FALSE, tidy=TRUE}
+require(data.table) # data mangling
+require(rstan) # run Stan from R
+require(ggplot2) #for general plotting
+require(bayesplot) # plot Stan output
+require(knitr)
+require(kableExtra)
+
+data.dir <- 'xxxxxxx/practical_2_gps/data'
+out.dir <- 'xxxxxxx/practical_2_gps/outputs'
+
+```
+
+# Study objectives
+Hello all!
+
+The objective of this lab is to fit a Bayesian normal linear regression model to the wildfire data from the previous lab. This will include using the probabilistic computing language `Stan`. 
+
+This work is licensed under a [Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International License](https://creativecommons.org/licenses/by-nc-nd/4.0/).
+
+Previously, we calculated the point prevalence of US land on fire per calendar month. We obtained the following time series:
+
+```{r, out.width='90%',include=TRUE, echo=FALSE, eval=TRUE, fig.align="center"}
+knitr::include_graphics(file.path(out.dir,'US_wild_fires_prevalence.png'))
+```
+
+We clearly note seasonal fluctuations in wildfire prevalence. However it is less clear if there has been a significant increase in wildfire prevalence over the years. Significant increases are a relatively standard question. Within a Bayesian framework, we can also obtain answers to considerably more bespoke questions. Let me pose one: if there is indeed a significant increase, by how much did wildfire prevalence increase from July 1995 to July 2015? 
+
+# Building a statistical model
+
+## Regression model
+
+To investigate these questions, we will stick with a Bayesian normal fixed effects regression model. 
+
+Let us denote by $y_i$ the log wildfire prevalence in the $i$th observation; by $X_{ij}$, $j=1,\dotsc,12$ binary indicators that evaluate to $1$ if the $i$th observation corresponds to the $j$th month in a year; and by $X_{i13}$ the standardized log year associated with the $i$th observation. We define our regression model as follows:
+
+\begin{align*}
+& y_i \sim \text{Normal}(\mu_i, \sigma^2) \\
+& \mu_i = \beta_0 + \beta_1 X_{i1} + \cdots + \beta_{13} X_{i13} \\
+& \beta_0 \sim \text{Normal}(0, 100) \\
+& \beta_j \sim \text{Normal}(0, 1) \\
+& \sigma \sim \text{Half-Cauchy}(0,1)
+\end{align*}
+
+Here, the $\beta$ terms are the unknown fixed effect regression coefficients, and $\sigma^2$ is the measurement noise. 
+
+We want to estimate the joint posterior density
+\begin{align*}
+p(\beta_0,\dotsc,\beta_{13},\sigma | y, X).
+\end{align*}
+
+To answer our first question, we are interested if the 95% credible interval of the marginal posterior density of $\beta_{13}$ is significantly above 0. 
+
+Please note that we would most typically endeavour to model the actual data, the fire counts, and prevalence would be a latent random variable. However, to keep things simple, let us ignore this complication and consider the calculated empirical prevalence as if it was data. 
+
+A second deficiency of our choice of a normal observation model is that, even if we accept to treat empirical prevalence estimates as if they were data, that prevalences are always non-negative. However the model admits negative values. This is why we consider the empirical log prevalences as input data, keeping things simple one more time.
+
+## Choice of prior distributions
+
+To specify the prior distributions, I worked out that the mean log wildfire prevalence is around $-8.5$. So we expect the posterior $\beta_0$ to be around that value in the above model. For this reason, we chose a $\text{Normal}(0, 10^2)$ prior, which has 95% mass approximately in $[-20,20]$. With this choice, we expect that the marginal posterior density of $\beta_0$ will lie nicely within the prior density of $\beta_0$. Note that it would be poor practice to specify a prior that is much wider (such as $\text{Normal}(0, 100^2)$) as this may lead to poor sampling. It would also be poor practice to center the prior at $-8.5$ (such as $\text{Normal}(-8.5, 1^2)$) as this could make it difficult to apply the model to a slightly different data set.
+
+For the binary offsets and the standardised $X_{i13}$, we can chose default $\text{Normal}(0, 1)$ priors. If $X_{i13}$ had not been standardised and be in nominal log year or year values, we would expect very small values of the posterior $\beta_{13}$, and a $\text{Normal}(0, 1)$ might be unsuitably vague. This should make clear to you that typically, the default prior choices that are listed and investigated in textbooks or the `Stan` manual are suitable to data and covariates on standardised scales. Once the data are standardised, then there are standard Bayesian recipes that can be applied. Without standardisation, off-the-shelf recommendations are hard to make or may be poorly justified.
+
+The measurement noise $\sigma$ is given a fairly heavy tailed $\text{Half-Cauchy}(0,1)$ prior density. Other good options might be an Exponential prior density, Half-normal prior, or Inverse-Gamma prior on $\sigma^2$; please see the `Stan` manual for further discussion.   
+
+## Standardising covariates
+
+Let us add a few words about covariate $X_{i1}$, which corresponds to the standardised log year of observation $i$. To make more clear what is going on, let us denote by $Z_{i1}$ the log year of observation $i$. We have
+\begin{align*}
+X_{i1} = \Big( Z_{i1} - \frac{1}{N} \sum_{i=1}^N Z_{i1} \Big) / s_Z.
+\end{align*}
+And therefore we also have that 
+\begin{align*}
+& \beta_0 + \beta_1 X_{i1} + \beta_2 X_{i2} + \cdots  \\
+& = \beta_0 + \beta_{1} \Big( Z_{i1} - \frac{1}{N} \sum_{i=1}^N Z_{i1} \Big) / s_Z + \cdots \\
+& = \Big( \beta_0 - \beta_{1} ( \frac{1}{N} \sum_{i=1}^N Z_{i1} ) / s_Z \Big) + \beta_1 X_{i1} + (\beta_{1}/ s_Z) Z_{i1} + \cdots\\
+& =: \tilde{\beta}_0 + \tilde{\beta}_{1} Z_{i1} + \cdots + 
+\end{align*}
+So, we see that:
+
+- the two linear predictors with and without standardisation are equivalent. The only difference is the magnitude of $\beta_0$ (shifting up or down by an additive term), and the scale of $\beta_{1}$ (not shifting by an additive term); and
+- standardising covariates facilitates the specification of prior densities because $\beta_{1}$ is the effect size for a standardised effect largely within $[-2,2]$ whereas this is not the case for $\tilde{\beta}_{1}$; and  
+- if the 95% posterior credible interval for $\beta_{1}$ is above $0$, then the 95% credible interval for $\tilde{\beta}_{1}$ is also above $0$. Standardising covariates does not change conclusions on whether effect sizes are significantly different from $0$ (so long as any impact of the priors can be ignored); and
+- if all covariates are standardised, then their effect sizes are directly comparable to identify the covariate that is most strongly associated with the outcome, whereas this is not possible without standardisation.
+
+## Model interpretability
+
+Why did we choose to include as covariate years on the log scale? To shed more light on this, let us denote years on the natural scale with $\tilde{Z}_{i1}$, so we have
+\begin{align*}
+X_{i1} = \Big( Z_{i1} - \frac{1}{N} \sum_{i=1}^N Z_{i1} \Big) / s_Z = \Big( \log \tilde{Z}_{i1} - \frac{1}{N} \sum_{i=1}^N \log \tilde{Z}_{i1} \Big) / s_Z.
+\end{align*}
+Next, note that the above model is a log-normal model on wildfire prevalence, $y_i \sim \text{log-Normal}(\mu_i, \sigma^2)$. Thus, we have that 
+\begin{align*}
+& \exp(\mu_i)
+\end{align*}
+corresponds to the median wildfire prevalence estimate, and $\exp(\mu_i + \sigma^2/2)$ corresponds to the mean wildfire prevalence associated with observation $i$. Expanding our linear predictor, we have 
+\begin{align*}
+& \exp(\mu_i)\\
+& = \exp(\tilde{\beta}_0) * \exp(\tilde{\beta}_{1} Z_{i1}) * \exp(\beta_2 X_{i2}) * \cdots\\
+& = \exp(\tilde{\beta}_0) * \tilde{Z}_{i1}^{\tilde{\beta}_{1}} * \exp(\beta_2 X_{i2}) * \cdots
+\end{align*}
+So, we see that:
+
+- specifying $X_{i1}$ in terms of log years allows us to answer the question if wildfire prevalence increases multiplicatively with years, subject to a polynomial transformation that depends on $\tilde{\beta}_{1}$. 
+- this may be as good a model as any other and posterior predictive checks and other tools will need to be used to establish if these choices are suitable to describe the data. This should make clear some of the complexities involved in using log or logit links on the interpretability of statistical regression models.  
+
+Finally, we can now also address our second question. Denote the median absolute increase in wildfire prevalence from July 1995 to July 2015 by $\delta$. We have:
+\begin{align*}
+& \delta\\
+& = \exp(\tilde{\beta}_0 + \beta_8) * 2015^{\tilde{\beta}_{1}} - \exp(\tilde{\beta}_0 + \beta_8) * 1995^{\tilde{\beta}_{1}}\\
+& = \exp(\tilde{\beta}_0 + \beta_8 + \tilde{\beta}_{1} * \log(2015) ) - \exp(\tilde{\beta}_0 + \beta_8 + \tilde{\beta}_{1} * \log(1995) )\\
+& = \exp\Big(\beta_0 + \beta_8 + \beta_{1} * \text{std-}\log(2015) \Big) - \exp\Big(\beta_0 + \beta_8 + \beta_{1} * \text{std-}\log(1995) \Big)\\
+\end{align*}
+So, we see that:
+
+- we can easily transform the Monte Carlo samples of the joint posterior density of $\beta_0$, $\beta_1$, $\beta_{8}$ to obtain Monte Carlo samples of the posterior density of $\delta$; and
+- we can always calculate summaries of the posterior distribution of $\delta$ from the Monte Carlo samples, such as the mean, median, or lower/upper quantiles; and
+- if we first summarise the posterior distributions of $\beta_0$, $\beta_1$, $\beta_{8}$, then in general we cannot calculate from these alone the mean, median, or lower/upper quantiles of $\delta$; so
+- our golden rule is to first transform Monte Carlo outputs to desired target quantities, and only then summarise the Monte Carlo distribution of desired target quantities to means, medians, or lower/upper quantiles of $\delta$.
+
+# Numerical inference with Stan
+
+## Preparing the regression analysis
+
+We start by:
+
+- selecting just the data that we need
+- transforming the response variable to the log scale, so the normality assumption is more appropriate
+- preparing the binary coviarates that correspond to each month
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE} 
+# load wildfire prevalence from lab 1
+file <- file.path(data.dir,'US_wild_fires_prevalence.rds')
+wfp <- readRDS(file)
+land_area <- wfp[1, LANDAREA]
+# select variables needed to answer study question
+wfp <- subset(wfp, select = c(FIRE_YEAR, MONTH, PREVALENCE))
+str(wfp)
+
+# set up log prevalence as response variable for a normal regression model
+wfp[, LOG_PREV := wfp[, log(PREVALENCE)] ]
+# quick check that log response is normal
+#ggplot(wfp, aes(x = LOG_PREV)) + geom_histogram() + theme_bw()
+
+# set up covariates
+wfp[, FIRE_YEAR_2 := log(FIRE_YEAR)]
+wfp[, FIRE_YEAR_2 := (FIRE_YEAR_2 - mean(FIRE_YEAR_2))/sd(FIRE_YEAR_2) ]
+set(wfp, NULL, 'MONTH', wfp[, as.integer(MONTH)])
+for (x in 1:12)
+{
+  set(wfp, NULL, paste0('mo_',x), 0L)
+  set(wfp, wfp[, which(MONTH == x)], paste0('mo_',x), 1L)
+}
+```
+
+## Stan run
+
+We will stick with a Bayesian normal fixed effects regression model for outcomes that are assumed to be normally distributed. In principle, you could could use this default implementation on many other data science problems beyond our wildfire data set.
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=TRUE} 
+# define normal regression using Stan syntax
+wfp_model_text <- "
+data{
+    int<lower=1> N;
+    int<lower=1> K;
+    real y[N];
+    matrix[N,K] X;
+}
+parameters{
+    real<lower=0> sigma;
+    real beta0;
+    vector[K] beta;
+}
+transformed parameters{
+    vector[N] mu;
+    mu = beta0 + X * beta;
+}
+model{
+    sigma ~ cauchy( 0 , 1 );
+    beta0 ~ normal( 0 , 10 );
+    beta ~ normal( 0 , 1 );
+    y ~ normal( mu , sigma );
+}
+"
+
+# define data in format needed for model specification
+stan_data <- list()
+stan_data$N <- nrow(wfp)
+stan_data$X <- unname(as.matrix(subset(wfp, select = -c(MONTH, PREVALENCE, LOG_PREV, FIRE_YEAR))))
+stan_data$K <- ncol(stan_data$X)
+stan_data$y <- wfp$LOG_PREV
+```
+
+Use commands shown previously to compile the `Stan` model into `wfp_model1_compiled`, and then use the compiled `Stan` model to run `Stan`'s Hamiltonian Monte Carlo algorithm for a total of $5000$ iterations, including a warmup of $500$ iterations, and $4$ HMC chains. Store the output in `wfp_model1_fit`. 
+```{r, include=!include_solutions, eval=FALSE, echo=!include_solutions, tidy=FALSE}
+# TODO compile the model
+# wfp_model1_compiled <- rstan::stan_model
+
+# TODO run Stan
+# wfp_model1_fit <- rstan::sampling
+```
+
+```{r, include=include_solutions, eval=include_solutions, echo=include_solutions, tidy=FALSE, cache=TRUE, results='hide'}
+# compile the model
+wfp_model1_compiled <- rstan::stan_model(
+  model_name = 'model1', 
+  model_code = gsub('\t',' ',wfp_model_text)
+  )
+
+# run Stan
+wfp_model1_fit <- rstan::sampling(wfp_model1_compiled, 
+  data = stan_data, 
+  warmup = 5e2, iter = 5e3, chains = 4
+  )
+saveRDS(wfp_model1_fit, file = file.path(out.dir, 'wildfire_prevalence_normal_model_traces.rds'))
+```
+
+
+```{r, include=TRUE, eval=TRUE, echo=FALSE, tidy=FALSE} 
+wfp_model1_fit <- readRDS( file.path(out.dir, 'wildfire_prevalence_normal_model_traces.rds') )
+```
+
+## Convergence and mixing analysis of Stan output
+
+Before we analyse the estimated model parameters in detail, of course we need to check that the algorithm converged and mixed suitably:
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, cache=TRUE} 
+# there are several way to obtain all the basic information in one go.
+# print(wfp_model1_fit) 
+# --> this returns ALL parameters, including many that are not 
+#     of direct interest, accepts as input stanfit object
+# monitor
+# --> this returns ALL parameters, including many that are not 
+#     of direct interest, accepts as input array of Monte Carlo draws
+# --> this is also very slow
+
+# explore marginal posterior distributions, rhat, neff
+# this is my suggested way to extract summaries of just those 
+# quantities that I am interested in:
+wfp_model1_su <- summary(wfp_model1_fit)$summary
+wfp_model1_su <- wfp_model1_su[grepl("beta|sigma|lp",rownames(wfp_model1_su)), ] 
+```
+
+Check the output for a minute:
+
+- What does the column `n_eff` mean, and are the values reasonably large?
+- What does the column `Rhat` mean, and are the values reasonably small?
+
+```{r, include=!include_solutions, eval=FALSE, echo=!include_solutions, tidy=FALSE}
+# TODO
+```
+```{r, include=include_solutions, eval=include_solutions, echo=include_solutions, tidy=FALSE, cache=TRUE} 
+wfp_model1_su
+```
+
+The $\hat{R}$ and $n_{\text{eff}}$ statistics are just scalar indicators of convergence and mixing. It is much clearer to diagnose potential numerical issues with the trace plots and pair plots:
+
+```{r, include=TRUE, eval=FALSE, echo=TRUE, tidy=FALSE, cache=TRUE} 
+# trace plots
+# remember to INCLUDE the warmup period and to NOT permute the iterations 
+#   when making trace plots
+#   
+# note regex_pars to select just those variables of interest
+# and when it is cumbersome to use the 'pars' argument of the 
+# 'extract' function
+po <- rstan:::extract(wfp_model1_fit, 
+                      inc_warmup = TRUE, 
+                      permuted = FALSE
+                      )
+bayesplot:::color_scheme_set("mix-blue-pink")
+p <- bayesplot:::mcmc_trace(po,  
+                            regex_pars = "beta|sigma|lp", 
+                            n_warmup = 5e2,
+                            facet_args = list(ncol = 1, labeller = label_parsed)
+                            )
+pdf(file=file.path(out.dir,'wildfire_prevalence_normal_model_traces.pdf'), w=10, h=40)
+print(p)
+dev.off()
+```
+
+```{r,  out.width='99%',include=include_solutions, echo=FALSE, eval=include_solutions, fig.align="center"}
+po <- rstan:::extract(wfp_model1_fit, inc_warmup = TRUE, permuted = FALSE)
+p <- bayesplot:::mcmc_trace(po,  pars = "beta[1]", n_warmup = 5e2,
+		facet_args = list(ncol = 1, labeller = label_parsed))
+ggsave(file.path(out.dir,'wildfire_prevalence_normal_model_trace_beta1.png'), p, w = 10, h = 5)
+knitr::include_graphics(file.path(out.dir,'wildfire_prevalence_normal_model_trace_beta1.png'))
+```
+
+```{r, include=TRUE, eval=FALSE, echo=TRUE, tidy=FALSE} 
+# pair plot
+# useful to assess correlations in the joint posterior
+# note that here, we no longer want to include the warmup period
+po <- rstan:::extract(wfp_model1_fit, inc_warmup = FALSE, permuted = FALSE )
+p <- bayesplot::mcmc_pairs(po, 
+                           regex_pars = "beta|sigma|lp", 
+                           diag_fun = "dens", 
+                           off_diag_fun = "hex"
+                           )
+ggsave(file=file.path(out.dir,'wildfire_prevalence_normal_model_pairplot.pdf'), p, w=15, h=15)
+```
+```{r,  out.width='99%',include=include_solutions, echo=FALSE, eval=include_solutions, fig.align="center"}
+po <- rstan:::extract(wfp_model1_fit, inc_warmup = FALSE, permuted = FALSE)
+p <- bayesplot::mcmc_pairs(po, 
+                           pars = c("beta0","beta[1]","beta[2]","beta[3]","beta[4]"), 
+                           diag_fun = "dens", 
+                           off_diag_fun = "hex"
+                           )
+ggsave(file.path(out.dir,'wildfire_prevalence_normal_model_pairs_beta1_beta4.png'), p, w = 10, h = 10)
+knitr::include_graphics(file.path(out.dir,'wildfire_prevalence_normal_model_pairs_beta1_beta4.png'))
+```
+
+Check the output for a minute:
+
+- What do the trace plots show? Are the trace plots reasonable?
+- What do the pair plots show? Are the pair plots reasonable?
+
+```{r, include=!include_solutions, eval=FALSE, echo=!include_solutions, tidy=FALSE}
+# TODO
+```
+
+# Answers to our questions
+
+## Has wildfire prevalence increased significantly with years?
+
+We inspect the marginal posterior densities of the model parameters:
+
+- In the plot below, the circle corresponds to the mean, the box to the interquartile range, and the lines to 95% credible intervals
+- We can clearly observe significant seasonal effects that act as offset relative to the baseline coefficient `beta0`. For example in June to August, log prevalence is significantly above baseline.
+
+```{r, include=TRUE, eval=TRUE, echo=TRUE, tidy=FALSE, out.width = "50%", fig.align='center'} 
+po <- as.array(wfp_model1_fit)
+p <- bayesplot::mcmc_intervals(po, 
+                               regex_pars = "beta|sigma", 
+                               point_est = 'mean', 
+                               prob = 0.5, 
+                               prob_outer = 0.95
+                               )
+ggsave(file = file.path(out.dir,'wildfire_prevalence_normal_model_mar_intervals.png'), p, w = 6, h = 8)
+knitr::include_graphics(file.path(out.dir,'wildfire_prevalence_normal_model_mar_intervals.png'))
+```
+
+Let us zoom into details. What exactly does the coefficient `beta[1]` correspond to in our model? Extract the Monte Carlo samples, and calculate the posterior median and 95% credible intervals of `beta[1]`. What does this tell you?
+
+```{r, include=!include_solutions, eval=FALSE, echo=!include_solutions, tidy=FALSE}
+# TODO
+```
+
+
+```{r,  include=include_solutions, echo=include_solutions, eval=include_solutions, tidy=FALSE}
+po <- rstan:::extract(wfp_model1_fit, inc_warmup = FALSE)
+quantile(po$beta[,1], prob = c(0.5, 0.025, 0.975))
+
+# The coefficient `beta[1]` corresponds to the covariate `FIRE_YEAR_2`. 
+# It is a little hard to see, but it appears there is a significant positive 
+# effect of year on log wildfire prevalence in the summary plot of the marginal 
+# posterior densities. 
+
+# We can verify this by calculating the 95% credible intervals as I show below.
+# Indeed, the lower 2.5% quantile of the marginal posterior density of `beta[1]` 
+# is above 0, suggesting that log wildfire prevalence has increased with years.
+# Since `exp` is a monotonic function, the same is true for `exp(beta[1])` and so 
+# the model suggests that wildfire prevalence has increased with years.
+```
+
+
+## What was the absolute increase in wildfire prevalence from July 1995 to July 2015?
+
+We are now at our last question for this lab! If there is indeed a significant increase, by how much did wildfire prevalence increase from July 1995 to July 2015? A particular advantage of Bayesian analyses is that the estimated model parameters can be arbitrarily transformed into other generated quantities, and importantly the corresponding credible intervals are also easily obtained. Let me do a few preliminary steps:
+
+```{r,  include=TRUE, echo=TRUE, eval=TRUE, tidy=FALSE}
+po <- rstan:::extract(wfp_model1_fit, inc_warmup = FALSE)
+po <- cbind(po$beta0, po$beta[,c(8,1)])
+
+mean_log_year <- wfp[, mean(log(FIRE_YEAR))]
+sd_log_year <- wfp[, sd(log(FIRE_YEAR))]
+```
+
+Finally, use the equations at start of this lab to calculate the absolute increase in wildfire prevalence increase from July 1995 to July 2015, and the absolute increase in land on fire between from July 1995 to July 2015.
+
+```{r, include=!include_solutions, eval=FALSE, echo=!include_solutions, tidy=FALSE}
+# TODO
+```
+
+```{r,  include=include_solutions, echo=include_solutions, eval=include_solutions, tidy=FALSE}
+delta <- exp(po[,1] + po[,2] + po[,3] * ( log(2015) - mean_log_year)/sd_log_year) -
+  exp(po[,1] + po[,2] + po[,3] * ( log(1995) - mean_log_year)/sd_log_year)
+quantile(delta, prob = c(0.5, 0.025, 0.975)) 
+
+quantile(delta, prob = c(0.5, 0.025, 0.975)) * land_area
+```

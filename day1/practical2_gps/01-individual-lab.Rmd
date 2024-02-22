@@ -1,0 +1,348 @@
+---
+title: |
+  ![](images/IMP_ML_K_PS_CLEAR-SPACE2.png){height=14mm}
+  ![](images/MLGHN_Logo_colour.png){height=16mm}
+  <br><br>
+  Computing lab: Data mangling basics on wildfire data
+subtitle: 'North-South-AIMS-Imperial: modern statistics and global health'
+author: "Shozen Dan and Oliver Ratmann<br><br>"
+#output: pdf_document 
+output: 
+  bookdown::html_document2:
+    toc: TRUE
+    toc_float: TRUE
+    highlight: tango
+  bookdown::pdf_book:
+    keep_tex: yes
+---
+
+<style type="text/css">
+h1{
+  font-size: 24pt;
+}
+h2{
+  font-size: 18pt;
+}
+body{
+  font-size: 12pt;
+}
+</style>
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+include_solutions <- TRUE
+```
+
+# Study objectives
+Hello all!
+
+The objectives of this lab are to become familiar with basic data mangling functions (merge, melt, ggplot) and basic epidemiologic measures (incidence and prevalence).
+
+Let us look at a large, real data set, 1.88 million geo-referenced wildfires in the US that were reported to the national Fire Program Analysis system. [The data set is reported here on Kaggle in detail](https://www.kaggle.com/rtatman/188-million-us-wildfires).
+
+One more tip before we dive in: visit the [RStudio cheatsheet website](https://rstudio.com/resources/cheatsheets/) and download any cheat sheet that you might find useful. For the below, those on `date and time conversion`, `data.table`, and `ggplot` might be particularly helpful.
+
+This work is licensed under a [Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International License](https://creativecommons.org/licenses/by-nc-nd/4.0/).
+
+## Objective 1
+The first objective is to calculate the `incidence proportion` of US land area in which a new fire occured in 2010-2011. In general, the incidence proportion is the number of new cases observed in a population at risk during a particular study period. With population at risk, we usually mean only those individuals or units that can become a case, so for example water area is excluded when we consider wildfires, or men are excluded when we consider ovary cancer.
+
+So, we need to
+
+- calculate the denominator, the US land area (i.e. exclude water area); and
+- calculate the numerator, the US land area in which a new fire occurred in the period 2010-2011; and
+- then take the ratio.
+
+## Objective 2
+The second task is to calculate the `point prevalence` of US land area subject to ongoing wildfire devastation in each month in 2010-2011. In general, the point prevalence quantifies the proportion of existing cases in a population at a given time. Again, we usually mean only those individuals or units that can become a case, so for example water area is excluded in the denominator when we consider wildfires, or men are excluded when we consider ovary cancer.    
+
+You need to
+
+- calculate the denominator, the US land area (i.e. exclude water area); and
+- calculate the numerator, the US land area that was subject to ongoing/existing wildfire devastation in each month; and
+- take the ratio.
+
+## Objective 3
+The third and final task is to plot US wildfire prevalence over time.
+
+## Other things
+Along the way, we will also:
+
+- read from a `SQLite` database and store parts of the data as a `data.table`. If you are not familiar with `data.tables` revisit some online tutorials. Throughout, we here use the `data.table` package, which brings substantial efficiency gains when processing large data sets; and
+- make basic data transformations with the `data.table` package, like taking subsets and selecting columns; and
+- combine `data.tables` with the `merge` function; and
+- introduce more complex `data.table` operations that act simultaneously on subsets of rows, and replace traditional `for loops`; and
+- show you how to process dates in the `Date` class; and
+- cover the `melt` function in the the `data.table` package.
+
+# Load packages
+```{r, include=TRUE, eval=TRUE, message=FALSE, echo=TRUE, warning=FALSE, tidy=TRUE}
+# install.packages("RSQLite")
+require(RSQLite)
+require(DBI)
+require(dbplyr)
+require(data.table) # data mangling
+require(tidyverse) # data mangling
+require(knitr)
+require(kableExtra)
+require(formatR)
+
+data.dir <- 'xxxxxxx/practical_2_gps/data'
+out.dir <- 'xxxxxxx/practical_2_gps/outputs'
+
+```
+
+# Data analysis
+
+## Reading SQLite wildfire data into RDS format
+
+The code below reads parts of an `SQLite` wildfire data base and stores it in the traditional `RDS` format.
+```{r, include=TRUE, eval=FALSE, echo=TRUE, tidy=FALSE, cache=TRUE} 
+#
+# tutorial for interacting with SQLite 
+# https://datacarpentry.org/R-ecology-lesson/05-r-and-databases.html
+#
+
+# I downloaded the database from the above Kaggle link, 
+# https://www.kaggle.com/rtatman/188-million-us-wildfires
+# and stored it in the file
+file <- file.path(data.dir,'FPA_FOD_20170508.sqlite')
+
+# open SQLite database
+db_wf <- DBI::dbConnect(RSQLite::SQLite(), file)
+
+# list tables and columns
+dbplyr::src_dbi(db_wf)
+
+# read "fire" table and show column names
+wf <- dplyr::tbl(db_wf, sql("SELECT * FROM fires"))
+colnames(wf)
+
+# select columns
+# use the pipe command %>% that was introduced in the magrittr package
+# use collect to gather all rows from the SQLite data base 
+# and store in a standard R object
+wf <- wf %>% 
+  select(OBJECTID, FOD_ID, LATITUDE, LONGITUDE, STATE, 
+         COUNTY, FIPS_CODE, FIRE_YEAR, DISCOVERY_DOY, 
+         FIRE_SIZE) %>%
+  collect()
+
+# convert to data.table because of size of data, and save   
+wf <- as.data.table(wf)
+setnames(wf, 'DISCOVERY_DOY', 'DISCOVERY_DAY')
+saveRDS(wf, file=file.path(data.dir, 'FPA_FOD_20170508_fires.RDS'))
+DBI::dbDisconnect(db_wf)
+```
+
+## Merge state land area in square miles
+
+The code below illustrates basic functions for operating with `data.tables`, and in particular the `merge` function. We will use `data.tables` throughout the module because they bring substantial efficiency gains when processing large data sets, so take this opportunity to familiarize yourselves with the package.
+
+```{r, include=TRUE, eval=FALSE, echo=TRUE, tidy=FALSE, cache=TRUE} 
+wf <- readRDS(file.path(data.dir, 'FPA_FOD_20170508_fires.RDS'))
+
+# inspect the data type of each column
+str(wf)
+
+# here are the US land area measurements
+file <- file.path(data.dir,'us_states_area_measurements.csv')
+wa <- as.data.table(read.csv(file, stringsAsFactors = FALSE))
+
+# The first thing we note is that the wf data.table is using US state abbreviations, 
+# and the wa data.table is using the full state names.
+# so we need to do a bit more work.
+# here is a map between state names and state abbreviations
+# from https://worldpopulationreview.com/states/state-abbreviations
+file <- file.path(data.dir,'us_state_codes.csv')
+wc <- as.data.table(read.csv(file, stringsAsFactors = FALSE))
+
+# now we will merge the data.tables so we have land area and wild fires in one data.table
+setnames(wa, colnames(wa), toupper(colnames(wa)))
+setnames(wc, colnames(wc), toupper(colnames(wc)))
+wa <- subset(wa, select=c(STATE, LANDAREA, WATERAREA, TOTALAREA))
+wc <- subset(wc, select=c(STATE, CODE))
+wa <- merge(wc, wa, by='STATE') 
+#NOTE the last line is where the magic happens. 
+#the two data.tables are joint by the key 'STATE'
+#be sure to understand how this works.
+
+setnames(wf, 'STATE', 'CODE')
+sort(unique(wf$CODE))
+sort(unique(wa$CODE))
+# shows Puerto Rico not in our codes -- never mind, let s exclude Puerto Rico
+wf <- subset(wf, CODE!='PR')
+stopifnot( all( sort(unique(wf$CODE))==sort(unique(wa$CODE)) ) )
+wf <- merge(wf, wa, by='CODE') 
+#NOTE the last line is where the magic happens. 
+#the two data.tables are joint by the key 'STATE'
+```
+
+## Calculate incidence proportion of US land area subject to wildfire devastation in 2010-2011.
+
+Your first task today is to calculate the `incidence proportion` of US land area in which a new fire occured in the period 2010-2011. Two tips:
+
+- one acre of land corresponds to 0.0015625 square miles.
+- the answer should be 0.578%, i.e. approximately 1 in 200 square miles of US land had a new fire occurring in the two years 2010-2011.
+
+```{r, include=!include_solutions, eval=FALSE, echo=!include_solutions, tidy=FALSE}
+# TODO
+```
+
+```{r, include=include_solutions, eval=FALSE, echo=include_solutions, tidy=FALSE, cache=TRUE} 
+# subset to unique state entries in order to calculate the total land area
+wfi <- subset(wf, select=c(CODE, STATE, LANDAREA, WATERAREA, TOTALAREA))
+wfi <- unique(wfi)
+
+# land at risk is only the land area, not the water area
+# we will also for simplicity ignore land area that is already burning even if it is
+# actually not at risk of starting to burn
+# 
+# this is similar in epidemiologic or infectious disease studies as well: 
+# individuals who are already suffering from a chronic disease or from an infectious disease
+# are not counted in the population at risk for acquiring the disease
+land_at_risk <- sum( wfi$LANDAREA )
+
+# land in which a new fire occurred in 2010-2011, the study period
+str(wf) # ok that s good, FIRE_YEAR is already stored as integer
+tmp <- subset(wf, FIRE_YEAR>2009 & FIRE_YEAR<2012)
+
+# convert acres to square miles
+# #NOTE assignment with data.table. this avoid deep copying of the data.table
+tmp[, FIRE_SIZE_SQM:= FIRE_SIZE * 0.0015625]  
+land_burnt <- sum(tmp$FIRE_SIZE_SQM)
+incidence_proportion <- land_burnt / land_at_risk # note: the unit here is per sqm per two years
+incidence_proportion2 <- land_burnt / land_at_risk / 24 # note: the unit here is per sqm per month
+```
+
+## Calculate wildfire prevalence by month 
+Your second task today is to calculate the point prevalence of US land area subject to ongoing wildfire devastation in each month.
+
+I will first show you how to convert the time columns into a proper `Date` object, and then extract `months`:
+```{r, include=TRUE, eval=FALSE, echo=TRUE, tidy=FALSE, cache=TRUE} 
+# the following post helps us approach the problem:
+# https://stackoverflow.com/questions/24200014/convert-day-of-year-to-date
+
+# first add a column that gives the correct 'origin' as in the above post 
+# to convert to date format
+wf[, DUMMY:= paste0(FIRE_YEAR-1,'-12-31')]
+
+# next follow the commands in the above post
+wf[, DISCOVERY_DATE:= as.Date(DISCOVERY_DAY, origin=DUMMY)]
+
+# clean up using in-built data.table functions that avoid making deep 
+# copies of the large data
+set(wf, NULL, c('DISCOVERY_DAY','DUMMY'), NULL)
+
+# now it is easy to define the month 
+wf[, DISCOVERY_MONTH:= strftime(DISCOVERY_DATE, "%m")]
+```
+
+To calculate wildfire prevalence, we will additionally assume that each fire lasted 1 week from the discovery date onwards. With this assumption, it is easy to check if a fire was still burning in the following month. We just need to calculate the last day on which the fire burnt.
+
+The following code does these calculations, and introduces the important `melt` function:
+```{r, include=TRUE, eval=FALSE, echo=TRUE, tidy=FALSE, cache=TRUE} 
+
+wf[, FIRE_LAST_DAY:= DISCOVERY_DATE+7]
+wf[, FIRE_LAST_DAY_MONTH:= strftime(FIRE_LAST_DAY, "%m")]
+
+# if fire ends in the same month, then we should not count 
+# the fire twice (have a look at the melt function below to understand)
+wfl_part1 <- subset(wf, DISCOVERY_MONTH==FIRE_LAST_DAY_MONTH)
+wfl_part1[, FIRE_LAST_DAY_MONTH:=NULL]
+
+#the magic is now to use the melt function
+#the melt function translates a data.table from wide format to long format
+#the wide format pertains to the columns DISCOVERY_MONTH and FIRE_LAST_DAY_MONTH
+#in the long format will list each fire several times in rows, if it burned over several months
+#this means that our prevalence calculation is straightforward when the data is in long format
+wfl_part2 <- subset(wf, DISCOVERY_MONTH!=FIRE_LAST_DAY_MONTH)
+wfl_part2 <- melt(wfl_part2, 
+                  measure.vars = c('DISCOVERY_MONTH','FIRE_LAST_DAY_MONTH'), 
+                  value.name = 'MONTH'
+                  )
+
+# adjust for spillover to next year
+tmp <- wfl_part2[, which(
+  strftime(FIRE_LAST_DAY, "%Y") != strftime(DISCOVERY_DATE, "%Y") & 
+  variable == "FIRE_LAST_DAY_MONTH" 
+  )]
+set(wfl_part2, tmp, 'FIRE_YEAR', wfl_part2[tmp, as.integer(strftime(FIRE_LAST_DAY, "%Y"))])
+
+# now put everything together
+# the end result is a data.table in which a fire occurs twice if it burnt in two months
+wfl_part1 <- melt(wfl_part1, 
+                  measure.vars = c('DISCOVERY_MONTH'), 
+                  value.name = 'MONTH'
+                  )
+wfl <- rbind(wfl_part1, wfl_part2)
+```
+
+Now it is your turn to calculate the point prevalences.
+
+You should find point prevalences for 288 months, and in magnitude the point prevalences should be much smaller than the incidence proportion over the 2 year period 2010-2011.
+
+```{r, include=!include_solutions, eval=FALSE, echo=!include_solutions, tidy=FALSE}
+# TODO
+```
+
+```{r, include=include_solutions, eval=FALSE, echo=include_solutions, tidy=FALSE, cache=TRUE} 
+#the magic now is to use the keys FIRE_YEAR and MONTH to calculate 
+#the point prevalence of land area that is subject to wildfires
+#a few quick rules to use this functionality of data.tables
+#1- inside {} brackets, you can call any R functions that you 
+#like using the column names in your data.table
+#2- you always need to return a list
+wfp <- wfl[, {
+    total_fire_size= sum(FIRE_SIZE)
+    list(FIRE_SIZE= total_fire_size)
+  }, by=c('FIRE_YEAR','MONTH')]
+
+# convert acres to square miles
+wfp[, FIRE_SIZE_SQM:= FIRE_SIZE * 0.0015625] 
+
+# add total land area and calculate point prevalence
+land_at_risk <- sum(wfi$LANDAREA)
+wfp[, LANDAREA:= land_at_risk]
+wfp[, PREVALENCE:= FIRE_SIZE_SQM/land_at_risk]
+```
+
+## Plot wildfire prevalence by month 
+
+Your third and final task is to plot US wildfire prevalence over time. Specifically, plot:
+
+- dates (year and month) on the x-axis
+- prevalence on the y-axis
+- using `ggplot`, `geom_line`, and `geom_point` 
+
+so that you get a plot similar to the one below:
+
+```{r, out.width='90%',include=TRUE, echo=FALSE, eval=TRUE, fig.align="center"}
+knitr::include_graphics(file.path(out.dir,'US_wild_fires_prevalence.png'))
+```
+
+```{r, include=!include_solutions, eval=FALSE, echo=!include_solutions, tidy=FALSE}
+# TODO
+```
+
+
+```{r, include=include_solutions, eval=FALSE, echo=include_solutions, tidy=FALSE, cache=TRUE} 
+
+# convert back to Date object for plotting
+wfp[, DATE:= as.Date(paste0(FIRE_YEAR, '-', MONTH, '-01'))]
+saveRDS(wfp, file=file.path(data.dir,'US_wild_fires_prevalence.rds'))
+
+# use ggplot for plotting
+p <- ggplot(wfp, aes(x=DATE, y=PREVALENCE)) + 
+  geom_line() +
+  geom_point() +
+  scale_x_date(date_breaks= '6 months') +
+  scale_y_continuous(labels=scales::percent) +
+  labs(x='', y='US land area on fire') +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle=45,vjust=1,hjust=1))
+ggsave(file=file.path(out.dir,'US_wild_fires_prevalence.png'), p, w=12, h=6)
+```
