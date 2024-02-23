@@ -347,7 +347,7 @@ tre2.lik
 
 ```
 
-We next optimise, where the algorithm searches the tree topology space to find the best tree for the chosen substitution rate model, optimising tree topology (optNni), base frequencies (optBf) and substitution rates (optQ).
+We next optimise, where the algorithm searches the tree topology space to find the best tree, optimising tree topology (optNni), base frequencies (optBf) and substitution rates (optQ).
 
 ```{r, out.width='100%',fig.width=8, fig.height=8, include=TRUE, echo=TRUE, eval=TRUE, fig.align="center"}
 
