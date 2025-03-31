@@ -1,7 +1,7 @@
 ---
 title: |
-  ![](images\IMP_ML_K_PS_CLEAR-SPACE2.png){height=14mm}
-  ![](images\MLGHN_Logo_colour.png){height=16mm}
+  ![](images/IMP_ML_K_PS_CLEAR-SPACE2.png){height=14mm}
+  ![](images/MLGHN_Logo_colour.png){height=16mm}
   <br><br>
   Computing lab: Stan Basics
 subtitle: 'North-South-AIMS-Imperial: modern statistics and global health'
@@ -32,7 +32,7 @@ knitr::opts_chunk$set(
   collapse = TRUE,
   comment = "#>"
 )
-include_solutions <- FALSE
+include_solutions <- T
 ```
 
 # Study objectives
@@ -43,8 +43,6 @@ By the end of this lab,
 - you will understand the key benefits of modern statistical computing languages such as `Stan`; and
 - you will have installed the `Stan` software within `R`, either via `rstan` or `cmdstanr`; and 
 - you will be familiar with a typical analysis workflow using `Stan`, and associated `R` commands.
-
-This work is licensed under a [Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International License](https://creativecommons.org/licenses/by-nc-nd/4.0/).
 
 # Why Stan?
 
@@ -63,7 +61,7 @@ There are several modern alternatives to `Stan`, including
 
 # Installation
 
-The first objective of today's lab is to install `Stan` on your computer, along with related helpful packages. We hope you may have already achieved this but please consult the installation instructions below in detail if you haven't. A key step in working with `Stan` is that your model is compiled using `C++`, and for this step `R` needs to know where your compilers live, and the correct compiler versions of course also need to be installed. This is why you need to install and configure the chain of `C++` tools on your Linux, MacOS, or Windows system as described below, and this is why installation is a little more involved compared to installations of most other `R` packages. 
+The first objective of today's lab is to install `Stan` on your computer, along with related helpful packages. Please consult the installation instructions below in detail. A key step in working with `Stan` is that your model is compiled using `C++`, and for this step `R` needs to know where your compilers live, and the correct compiler versions of course also need to be installed. This is why you need to install and configure the chain of `C++` tools on your Linux, MacOS, or Windows system as described below, and this is why installation is a little more involved compared to installations of most other `R` packages. 
 
 Install `rstan`:
 
@@ -90,7 +88,7 @@ We aim to fit a normal model to 100 data points $y_i, i=1,\dotsc,n=100$, and est
 
 \begin{align*}
 &y_{i} \sim \text{Normal}(\mu, \sigma^2) \\
-& \mu \sim \text{Normal}(0,200)\\
+& \mu \sim \text{Normal}(0,100)\\
 & \sigma\sim \text{Half-Cauchy}(0,1).
 \end{align*}
 
@@ -138,7 +136,7 @@ require(kableExtra) # for Rmarkdown
 
 # change this line as needed to point to the directory 
 #    where all output from this lab is stored
-out.dir <- 'xxxxxxx/outputs'
+out.dir <- '/Users/yu/Library/CloudStorage/OneDrive-ImperialCollegeLondon/conference/AIMS_workshop_Rwanda_2024/AIMS-Imperial-workshop/src/stan_intro_lab'
 
 # set options relevant to rstan
 options(mc.cores = 1)
@@ -159,10 +157,21 @@ stan_data$y <- y
 model1_compiled <- rstan::stan_model(
   model_name = 'model1', 
   model_code = gsub('\t',' ',model1_text)
-  )
+)
+
+model1_compiled <- stan_model(
+  file = "~/Library/CloudStorage/OneDrive-ImperialCollegeLondon/Mac/aims/helloworld.stan",
+  model_name = "model1"
+)
 
 # run Stan
-# TODO model1_fit <-
+# model1_fit <- TODO
+# model1_fit <- sampling(model1_compiled,
+#                        data = stan_data,
+#                        seed = 123,
+#                        chains = 2,
+#                        warmup = 500,
+#                        iter = 2000)
 
 # TODO save output to RDS
 saveRDS(model1_fit, file = file.path(out.dir, "model1_fit_rstan.rds"))
@@ -205,9 +214,12 @@ model1_pars <- c("mu", "sigma")
 print(model1_fit, 
       pars = model1_pars,
       probs = c(0.025, 0.25, 0.5, 0.75, 0.975),
-      digits_summary = 2
-      )
+      digits_summary = 2)
 
+print(model1_fit, digits = 2)
+```
+
+```{r}
 # to plot traces and assess convergence, 
 # extract Monte Carlo samples including warmup and without permutation
 # 
@@ -222,12 +234,14 @@ bayesplot:::color_scheme_set("mix-blue-pink")
 p <- bayesplot:::mcmc_trace(model1_po,  
                             pars = c("lp__",model1_pars), 
                             n_warmup = 1e3,
-                            facet_args = list(nrow = 2)
-                            )
+                            facet_args = list(nrow = 2))
+
 pdf(file = file.path(out.dir,'model1_trace.pdf'), width = 10, height = 8)
 print(p)
 dev.off()
+```
 
+```{r}
 # make pairs plots of samples excluding warmup
 #
 # often helpful to plot the log posterior density too
@@ -235,17 +249,20 @@ model1_po <- rstan:::extract(model1_fit,
                              pars = c("lp__",model1_pars),
                              inc_warmup = FALSE, 
                              permuted = FALSE)
+
 p <- bayesplot::mcmc_pairs(model1_po, 
                            pars = c("lp__",model1_pars), 
-                           off_diag_args = list(size = 0.3, alpha = 0.3)
-                           )
+                           off_diag_args = list(size = 0.3, alpha = 0.3))
+print(p)
+dev.off()
 ggsave(file = file.path(out.dir,'model1_pairsplot.png'), 
        plot = p, 
        h = 20, 
        w = 20, 
-       limitsize = FALSE
-       )
+       limitsize = FALSE)
+```
 
+```{r}
 # to manipulate the posterior Monte Carlo samples after warmup
 # we typically prefer to
 # extract Monte Carlo samples as a data frame
@@ -262,17 +279,14 @@ model1_po <- as.data.frame(model1_po)
 # we mangle this as follows
 model1_po <- as.data.table(model1_po)
 model1_po[, iteration := seq_len(nrow(model1_po))]
-model1_po <- data.table::melt(model1_po, 
-                              id.vars = 'iteration'
-                              )
-set(model1_po, NULL, 'variable', model1_po[, as.character(variable)])
-set(model1_po, NULL, 'chain', model1_po[, gsub('(.*)\\.(.*)','\\1',variable)])
-set(model1_po, NULL, 'chain', model1_po[, as.integer(gsub('chain:','',chain))])
-set(model1_po, NULL, 'variable', model1_po[, gsub('(.*)\\.(.*)','\\2',variable)])
+model1_po <- data.table::melt(model1_po, id.vars = 'iteration')
+model1_po[, chain := gsub('(.*)\\.(.*)','\\1',variable)]
+model1_po[, chain := as.integer(stringr::str_replace(chain, "chain:", ""))]
+model1_po[, variable := gsub('(.*)\\.(.*)','\\2', variable)]
+
 model1_po <- data.table::dcast(model1_po, 
-                               iteration+chain ~ variable, 
-                               value.var = 'value'
-                               )
+                               iteration + chain ~ variable, 
+                               value.var = 'value')
 model1_po
 ```
 
@@ -414,7 +428,7 @@ What do you observe in terms of convergence, mixing, and the HMC traces in gener
 
 # The unidentifiable parameters example
 
-Finally, we will adapt the Hello World example slightly differently, again to explore how a non-successful numerical inference run with `Stan` might look like in the case when two parameters cannot be estimated from the data, only their combination. To engineer this situation, we will introduce two unkown random variables $\alpha_1$ and $\alpha_2$, and say that the sum of both is the mean in our Hello World normal model.
+Finally, we will adapt the Hello World example slightly differently, again to explore how a non-successful numerical inference run with `Stan` might look like in the case when two parameters cannot be estimated from the data, only their combination. To engineer this situation, we will introduce two unknown random variables $\alpha_1$ and $\alpha_2$, and say that the sum of both is the mean in our Hello World normal model.
 
 The learning outcome here is that a common reason why `Stan` fails to sample from a joint posterior is that the parameters in a model are highly correlated, and there are multiple equally likely solutions under the model as specified.
 
@@ -460,6 +474,7 @@ Let us run `Stan`'s Hamiltonian Monte Carlo algorithm for $1000$ iterations that
 # TODO trace plots
 # po <- 
 ```
+
 ```{r, include=include_solutions, eval=TRUE, message=FALSE, echo=include_solutions, tidy=FALSE, cache=TRUE, results="hide"} 
 model4_compiled <- rstan::stan_model(
   model_name = 'model4', 
@@ -551,10 +566,14 @@ p <- bayesplot:::mcmc_trace(po,  pars = c("mu", "sigma"), n_warmup = 1e3,
 pdf(file = file.path(out.dir,'model5_trace_unidentifiable_winformative_prior_N2.pdf'), width = 10, height = 6)
 print(p)
 dev.off()
+```
 
+```{r}
 # pair plot
 p <- bayesplot::mcmc_pairs(po, diag_fun = "dens", off_diag_fun = "hex")
 ggsave(file = file.path(out.dir,'model5_pair_unidentifiable_winformative_prior_N2.pdf'), p, w = 10, h = 10)
+print(p)
+dev.off()
 ```
 
 Let us reflect on the trace plots and the pair plots for the different models:
@@ -583,7 +602,7 @@ Let us reflect on the trace plots and the pair plots for the different models:
 
 Finally, we revisit our Hello World example to see how exactly each step above can be implemented with `cmdstanr`:
 
-```{r, include=TRUE, eval=FALSE, message=FALSE, echo=TRUE, warning=FALSE, tidy=TRUE, cache=TRUE}
+```{r, include=TRUE, eval=TRUE, message=FALSE, echo=TRUE, warning=FALSE, tidy=TRUE, cache=TRUE}
 require(data.table) # data mangling
 require(tidyverse) # data mangling
 require(bayesplot) # plot Stan output
@@ -593,7 +612,7 @@ require(cmdstanr) # for Stan
 
 # change this line as needed to point to the directory 
 #    where all output from this lab is stored
-out.dir <- '/Users/or105/Library/CloudStorage/OneDrive-ImperialCollegeLondon/OR_Work/teaching/2023-24/2023-24_MScBiomedicalStats/lectures/content_stan_intro'
+out.dir <- '/Users/yu/Library/CloudStorage/OneDrive-ImperialCollegeLondon/conference/AIMS_workshop_Rwanda_2024/AIMS-Imperial-workshop/src/stan_intro_lab'
 
 model1_cmdstan_text <- "
 data{
@@ -643,7 +662,9 @@ model1_fit_cmdstanr <- model1_compiled_cmdstanr$sample(
 
 # save output to RDS
 model1_fit_cmdstanr$save_object(file = file.path(out.dir, "model1_compiled_cmdstanr.rds"))
+```
 
+```{r}
 # load output from RDS
 model1_fit_cmdstanr <- readRDS(file.path(out.dir, "model1_compiled_cmdstanr.rds"))
 
@@ -676,7 +697,9 @@ p <- bayesplot:::mcmc_trace(model1_po,
 pdf(file = file.path(out.dir,'model1_cmdstanr_trace.pdf'), width = 10, height = 8)
 print(p)
 dev.off()
+```
 
+```{r}
 # make pairs plots of samples excluding warmup
 #
 # often helpful to plot the log posterior density too
@@ -695,7 +718,6 @@ ggsave(file = file.path(out.dir,'model1_cmdstanr_pairsplot.png'),
        w = 20, 
        limitsize = FALSE
        )
-
 # to manipulate the posterior Monte Carlo samples after warmup
 # we typically prefer to
 # extract Monte Carlo samples as a data frame
